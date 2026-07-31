@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import * as bcrypt from 'bcryptjs';
 import {
   AuthCredentials,
@@ -16,38 +16,51 @@ const BCRYPT_ROUNDS = 10;
  * 接入业务系统时可替换为数据库查询（数据库中同样只保存哈希）。
  */
 @Injectable()
-export class JwtStrategyImpl implements IAuthStrategy {
+export class JwtStrategyImpl implements IAuthStrategy, OnModuleInit {
   readonly name = 'jwt';
   private readonly logger = new Logger(JwtStrategyImpl.name);
 
   /**
    * 内置模拟用户表（演示用途）
-   * passwordHash 为 bcrypt 哈希，在构造时由明文演示密码生成，
-   * 验证时通过 bcrypt.compare 比对，全程不出现明文存储。
+   * 仅在 onModuleInit 异步初始化完成后填充，避免阻塞事件循环。
+   * NestJS 会在应用开始监听前等待 onModuleInit 完成，
+   * 因此对外提供服务时用户表必然已就绪。
    */
-  private readonly users: Array<{
+  private users: Array<{
     userId: string;
     username: string;
     passwordHash: string;
     permissions: string[];
-  }>;
+  }> = [];
 
-  constructor() {
-    // 启动时一次性生成演示账号的密码哈希，避免每次登录重复哈希计算
-    this.users = [
+  /**
+   * 模块初始化：异步生成演示账号的密码哈希
+   * 使用异步 bcrypt.hash 而非 hashSync，避免启动阶段阻塞事件循环
+   */
+  async onModuleInit(): Promise<void> {
+    // 演示账号定义（username -> 明文密码与权限，仅启动时用于生成哈希，运行期不保留明文）
+    const demoUsers = [
       {
         userId: 'u-1001',
         username: 'admin',
-        passwordHash: bcrypt.hashSync('admin123', BCRYPT_ROUNDS),
+        plainPassword: 'admin123',
         permissions: ['profile:read', 'admin:access', 'auth:strategy:switch'],
       },
       {
         userId: 'u-1002',
         username: 'alice',
-        passwordHash: bcrypt.hashSync('alice123', BCRYPT_ROUNDS),
+        plainPassword: 'alice123',
         permissions: ['profile:read'],
       },
     ];
+
+    // 并行异步哈希，初始化完成后立即丢弃明文
+    this.users = await Promise.all(
+      demoUsers.map(async ({ plainPassword, ...rest }) => ({
+        ...rest,
+        passwordHash: await bcrypt.hash(plainPassword, BCRYPT_ROUNDS),
+      })),
+    );
   }
 
   /**

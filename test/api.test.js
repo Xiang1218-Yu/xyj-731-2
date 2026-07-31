@@ -14,9 +14,15 @@
  *   - 登出后会话立即失效
  *   - 运行时动态切换策略（LDAP / OAuth2.0 登录验证）
  *   - 未认证请求拦截
+ *   - 真实 LDAP 服务器集成（ldapjs 起在测服务器，验证 bind 与资源释放）
+ *   - 第三方服务不可用时防挂起回归（黑洞服务器 + 超时断言）
  */
 
 const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
+const net = require('net');
+const ldap = require('ldapjs');
+const { spawn } = require('child_process');
+const path = require('path');
 
 // ---------------- 微型测试框架 ----------------
 let passed = 0;
@@ -43,10 +49,10 @@ async function test(name, fn) {
 }
 
 /** HTTP 请求封装：返回 { status, body } */
-async function api(method, path, { body, token } = {}) {
+async function api(method, path, { body, token, baseUrl } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const resp = await fetch(`${BASE_URL}${path}`, {
+  const resp = await fetch(`${baseUrl || BASE_URL}${path}`, {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
@@ -54,6 +60,50 @@ async function api(method, path, { body, token } = {}) {
   // 204 无响应体
   const text = await resp.text();
   return { status: resp.status, body: text ? JSON.parse(text) : null };
+}
+
+// ---------------- 测试辅助工具 ----------------
+
+/**
+ * 以独立进程启动一个服务实例（用于真实 LDAP / 防挂起等需要独立配置的集成场景）
+ * @param port 监听端口
+ * @param env 额外的环境变量（如 LDAP_URL、DEFAULT_AUTH_STRATEGY）
+ * @returns 子进程句柄
+ */
+function startServiceInstance(port, env = {}) {
+  return spawn(process.execPath, [path.join(__dirname, '..', 'dist', 'main.js')], {
+    env: { ...process.env, PORT: String(port), ...env },
+    stdio: 'ignore', // 丢弃子进程日志，保持测试输出整洁
+  });
+}
+
+/** 轮询等待服务实例就绪（/auth/strategy 返回 200） */
+async function waitServiceReady(port, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const resp = await fetch(`http://127.0.0.1:${port}/auth/strategy`);
+      if (resp.ok) return;
+    } catch {
+      // 服务尚未就绪，继续等待
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`端口 ${port} 的服务实例启动超时`);
+}
+
+/** 优雅停止子进程 */
+function stopServiceInstance(child) {
+  return new Promise((resolve) => {
+    if (!child || child.killed) return resolve();
+    child.once('exit', () => resolve());
+    child.kill('SIGTERM');
+    // 兜底：2 秒后仍未退出则强杀
+    setTimeout(() => {
+      if (!child.killed) child.kill('SIGKILL');
+      resolve();
+    }, 2000).unref();
+  });
 }
 
 // ---------------- 测试主流程 ----------------
@@ -258,6 +308,113 @@ async function main() {
     });
     assert(status === 401, `期望 401，实际 ${status}`);
   });
+
+  // ---------- 7. 真实 LDAP 服务器集成 ----------
+  // 场景：通过环境变量 LDAP_URL 指向一个真实的 LDAP 服务器（测试内用 ldapjs 临时启动），
+  // 验证真实 bind 认证链路，以及 bind 后 unbind + destroy 的资源释放时序不破坏正常认证。
+  console.log('【7】真实 LDAP 服务器集成');
+  const LDAP_TEST_PORT = 3100;
+  let ldapServer = null;
+  let ldapService = null;
+  try {
+    // 启动一个内存 LDAP 服务器：接受 carol/carol123，其余凭据拒绝
+    ldapServer = ldap.createServer();
+    ldapServer.bind('ou=users,dc=example,dc=com', (req, res, next) => {
+      if (
+        req.dn.toString() === 'uid=carol,ou=users,dc=example,dc=com' &&
+        req.credentials === 'carol123'
+      ) {
+        res.end();
+        return next();
+      }
+      return next(new ldap.InvalidCredentialsError('凭据无效'));
+    });
+    await new Promise((resolve) => ldapServer.listen(0, '127.0.0.1', resolve));
+    const ldapPort = ldapServer.address().port;
+
+    // 以服务实例方式启动应用，默认策略设为 ldap 并指向测试 LDAP 服务器
+    ldapService = startServiceInstance(LDAP_TEST_PORT, {
+      LDAP_URL: `ldap://127.0.0.1:${ldapPort}`,
+      DEFAULT_AUTH_STRATEGY: 'ldap',
+    });
+    await waitServiceReady(LDAP_TEST_PORT);
+    const ldapBase = `http://127.0.0.1:${LDAP_TEST_PORT}`;
+
+    await test('真实 LDAP bind 认证成功（carol/carol123）', async () => {
+      const { status, body } = await api('POST', '/auth/login', {
+        body: { username: 'carol', password: 'carol123' },
+        baseUrl: ldapBase,
+      });
+      assert(status === 200, `期望 200，实际 ${status}`);
+      assert(body.strategy === 'ldap', `策略应为 ldap，实际 ${body.strategy}`);
+      assert(body.accessToken, '应返回访问令牌');
+    });
+
+    await test('真实 LDAP bind 认证失败（错误密码）', async () => {
+      const { status } = await api('POST', '/auth/login', {
+        body: { username: 'carol', password: 'wrong' },
+        baseUrl: ldapBase,
+      });
+      assert(status === 401, `期望 401，实际 ${status}`);
+    });
+
+    await test('连续多次 bind 认证无资源泄漏异常（unbind/destroy 时序正确）', async () => {
+      // 连续触发多次认证，若 unbind/destroy 时序有误，会出现连接异常或认证失败
+      for (let i = 0; i < 5; i++) {
+        const { status } = await api('POST', '/auth/login', {
+          body: { username: 'carol', password: 'carol123' },
+          baseUrl: ldapBase,
+        });
+        assert(status === 200, `第 ${i + 1} 次认证期望 200，实际 ${status}`);
+      }
+    });
+  } finally {
+    // 清理：停止子服务实例与 LDAP 测试服务器
+    if (ldapService) await stopServiceInstance(ldapService);
+    if (ldapServer) ldapServer.close();
+  }
+
+  // ---------- 8. 第三方服务不可用时防挂起回归 ----------
+  // 场景：LDAP_URL 指向一个"黑洞"TCP 服务器（接受连接但永不响应），
+  // 验证 bind 整体超时兜底生效：请求在合理时间内返回 401 而不是挂起。
+  console.log('【8】第三方服务不可用防挂起');
+  const HANG_TEST_PORT = 3101;
+  let blackhole = null;
+  let hangService = null;
+  try {
+    // 黑洞服务器：接受连接后不做任何响应
+    blackhole = net.createServer(() => undefined);
+    await new Promise((resolve) => blackhole.listen(0, '127.0.0.1', resolve));
+    const blackholePort = blackhole.address().port;
+
+    hangService = startServiceInstance(HANG_TEST_PORT, {
+      LDAP_URL: `ldap://127.0.0.1:${blackholePort}`,
+      DEFAULT_AUTH_STRATEGY: 'ldap',
+    });
+    await waitServiceReady(HANG_TEST_PORT);
+    const hangBase = `http://127.0.0.1:${HANG_TEST_PORT}`;
+
+    await test('LDAP 服务器无响应时登录请求不挂起（超时返回 401）', async () => {
+      const start = Date.now();
+      const { status } = await api('POST', '/auth/login', {
+        body: { username: 'carol', password: 'carol123' },
+        baseUrl: hangBase,
+      });
+      const elapsed = Date.now() - start;
+      assert(status === 401, `期望 401，实际 ${status}`);
+      // LDAP bind 超时 5s，断言 9s 内返回（留有余量且小于全局超时 10s）
+      assert(elapsed < 9000, `请求耗时 ${elapsed}ms，超过 9000ms，疑似挂起`);
+    });
+
+    await test('服务在第三方超时后仍可正常处理后续请求', async () => {
+      // 验证超时兜底后服务自身未受影响
+      const { status } = await api('GET', '/auth/strategy', { baseUrl: hangBase });
+      assert(status === 200, `期望 200，实际 ${status}`);
+    });
+  } finally {
+    if (hangService) await stopServiceInstance(hangService);
+    if (blackhole) blackhole.close();
+  }
 
   // ---------- 结果汇总 ----------
   console.log(`\n========================================`);

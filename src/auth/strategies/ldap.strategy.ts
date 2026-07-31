@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import * as ldap from 'ldapjs';
 import * as bcrypt from 'bcryptjs';
 import {
@@ -12,6 +12,11 @@ import configuration from '../../config/configuration';
 const BCRYPT_ROUNDS = 10;
 /** LDAP bind 整体超时时间（毫秒），防止目录服务器不可用时请求挂起 */
 const LDAP_BIND_TIMEOUT_MS = 5000;
+/**
+ * unbind 报文发出后到强制销毁 socket 的宽限时间（毫秒）
+ * 保证 unbind 请求有机会发往服务器，同时兜底回调不触发的异常场景
+ */
+const LDAP_UNBIND_GRACE_MS = 500;
 
 /**
  * LDAP 认证策略
@@ -19,25 +24,33 @@ const LDAP_BIND_TIMEOUT_MS = 5000;
  * 未配置 LDAP_URL 时使用内置模拟目录（框架演示 / 测试用途，密码同样以 bcrypt 哈希存储）。
  */
 @Injectable()
-export class LdapStrategyImpl implements IAuthStrategy {
+export class LdapStrategyImpl implements IAuthStrategy, OnModuleInit {
   readonly name = 'ldap';
   private readonly logger = new Logger(LdapStrategyImpl.name);
   private readonly config = configuration();
 
   /**
    * 内置模拟目录（演示用途）：uid -> { passwordHash, userId, permissions }
-   * 密码以 bcrypt 哈希存储，避免明文落盘
+   * 密码以 bcrypt 哈希存储；在 onModuleInit 中异步生成，避免阻塞事件循环
    */
-  private readonly mockDirectory: Record<
+  private mockDirectory: Record<
     string,
     { passwordHash: string; userId: string; permissions: string[] }
-  > = {
-    carol: {
-      passwordHash: bcrypt.hashSync('carol123', BCRYPT_ROUNDS),
-      userId: 'ldap-3001',
-      permissions: ['profile:read'],
-    },
-  };
+  > = {};
+
+  /**
+   * 模块初始化：异步生成模拟目录的密码哈希
+   * 使用异步 bcrypt.hash 而非 hashSync，避免启动阶段阻塞事件循环
+   */
+  async onModuleInit(): Promise<void> {
+    this.mockDirectory = {
+      carol: {
+        passwordHash: await bcrypt.hash('carol123', BCRYPT_ROUNDS),
+        userId: 'ldap-3001',
+        permissions: ['profile:read'],
+      },
+    };
+  }
 
   /**
    * 使用用户名 / 密码执行 LDAP 认证
@@ -137,21 +150,41 @@ export class LdapStrategyImpl implements IAuthStrategy {
 
   /**
    * 释放 LDAP 客户端资源
-   * unbind 是协议层的正常关闭（依赖服务器响应，可能挂起）；
-   * destroy 会直接销毁底层 socket。两者结合确保任何场景下连接都被释放。
+   * 释放顺序设计：
+   * 1. unbind 回调内 destroy —— 正常路径，unbind 报文发出后再销毁 socket；
+   * 2. 宽限期定时器兜底 destroy —— 服务器无响应导致 unbind 回调不触发时，
+   *    在 LDAP_UNBIND_GRACE_MS 后强制销毁，避免连接泄漏。
    */
   private releaseClient(client: ldap.Client, dn: string): void {
-    try {
-      client.unbind(() => {
-        // unbind 正常完成后销毁 socket，兜底残余资源
+    /** 保证 destroy 只执行一次 */
+    let destroyed = false;
+    const destroyOnce = () => {
+      if (destroyed) {
+        return;
+      }
+      destroyed = true;
+      try {
         client.destroy();
-      });
-      // 防御：unbind 回调不触发时（如连接已断开），立即强制销毁
-      client.destroy();
+      } catch (err) {
+        this.logger.warn(
+          `LDAP socket 销毁异常: dn=${dn}, ${(err as Error).message}`,
+        );
+      }
+    };
+
+    try {
+      // 正常路径：unbind 报文发出并完成后再销毁 socket
+      client.unbind(() => destroyOnce());
     } catch (err) {
+      // unbind 调用本身抛错（如连接已断开），直接销毁
       this.logger.warn(
-        `LDAP 客户端资源释放异常: dn=${dn}, ${(err as Error).message}`,
+        `LDAP unbind 异常: dn=${dn}, ${(err as Error).message}`,
       );
+      destroyOnce();
+      return;
     }
+
+    // 兜底路径：宽限期后回调仍未触发则强制销毁；unref 避免阻止进程退出
+    setTimeout(destroyOnce, LDAP_UNBIND_GRACE_MS).unref();
   }
 }
