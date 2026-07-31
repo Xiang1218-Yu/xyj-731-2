@@ -1,5 +1,5 @@
 /**
- * 统一身份认证服务 - 接口测试脚本（Node.js，无第三方依赖）
+ * 统一身份认证服务 - 接口测试脚本（Node.js 原生能力编写，复用项目依赖中的 ldapjs 搭建在测 LDAP 服务器）
  *
  * 运行方式：
  *   1. 先启动服务：npm run start（默认 http://localhost:3000）
@@ -16,6 +16,12 @@
  *   - 未认证请求拦截
  *   - 真实 LDAP 服务器集成（ldapjs 起在测服务器，验证 bind 与资源释放）
  *   - 第三方服务不可用时防挂起回归（黑洞服务器 + 超时断言）
+ *
+ * 依赖说明：
+ *   本脚本 require 的 ldapjs 来自项目生产依赖（dependencies）。
+ *   ldapjs 同时被生产代码 src/auth/strategies/ldap.strategy.ts 在运行时加载，
+ *   因此必须保留在 dependencies 中（不能移入 devDependencies），
+ *   测试脚本直接复用，无需重复声明。
  */
 
 const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
@@ -64,23 +70,83 @@ async function api(method, path, { body, token, baseUrl } = {}) {
 
 // ---------------- 测试辅助工具 ----------------
 
+/** 子进程日志环形缓冲的最大长度（字符），避免长时间运行占内存 */
+const CHILD_LOG_TAIL_LENGTH = 4000;
+
 /**
  * 以独立进程启动一个服务实例（用于真实 LDAP / 防挂起等需要独立配置的集成场景）
+ * stdio 使用 pipe 并捕获输出到内存缓冲，便于启动失败时排查原因
  * @param port 监听端口
  * @param env 额外的环境变量（如 LDAP_URL、DEFAULT_AUTH_STRATEGY）
- * @returns 子进程句柄
+ * @returns { child, getLogTail } 子进程句柄与日志读取函数
  */
 function startServiceInstance(port, env = {}) {
-  return spawn(process.execPath, [path.join(__dirname, '..', 'dist', 'main.js')], {
-    env: { ...process.env, PORT: String(port), ...env },
-    stdio: 'ignore', // 丢弃子进程日志，保持测试输出整洁
+  const child = spawn(
+    process.execPath,
+    [path.join(__dirname, '..', 'dist', 'main.js')],
+    {
+      env: { ...process.env, PORT: String(port), ...env },
+      stdio: ['ignore', 'pipe', 'pipe'], // 捕获 stdout/stderr，便于失败排查
+    },
+  );
+
+  // 环形缓冲：仅保留末尾 CHILD_LOG_TAIL_LENGTH 个字符
+  let logTail = '';
+  const appendLog = (chunk) => {
+    logTail = (logTail + chunk.toString()).slice(-CHILD_LOG_TAIL_LENGTH);
+  };
+  child.stdout.on('data', appendLog);
+  child.stderr.on('data', appendLog);
+
+  return { child, getLogTail: () => logTail };
+}
+
+/**
+ * 获取一个当前空闲的 TCP 端口
+ * 避免硬编码端口（如 3100）与其他进程冲突导致子服务实例启动失败
+ */
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      srv.close(() => {
+        // 边界处理：address() 可能返回 null（异常关闭）或 string（unix socket）
+        if (!addr || typeof addr === 'string') {
+          reject(new Error('获取空闲端口失败：address() 返回无效值'));
+        } else {
+          resolve(addr.port);
+        }
+      });
+    });
   });
 }
 
-/** 轮询等待服务实例就绪（/auth/strategy 返回 200） */
-async function waitServiceReady(port, timeoutMs = 30000) {
+/**
+ * 轮询等待服务实例就绪（/auth/strategy 返回 200）
+ * 同时监听子进程退出事件：若子进程提前退出（如端口占用、配置错误），
+ * 立即失败并输出捕获的日志，而不是空等超时
+ */
+async function waitServiceReady(port, instance, timeoutMs = 30000) {
+  const { child, getLogTail } = instance;
+
+  // 子进程早退检测：一旦退出立即置为失败原因
+  let exitInfo = null;
+  child.once('exit', (code, signal) => {
+    exitInfo = { code, signal };
+  });
+
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    // 子进程已退出：直接报错并附带启动日志
+    if (exitInfo) {
+      throw new Error(
+        `端口 ${port} 的服务实例提前退出（code=${exitInfo.code}, signal=${exitInfo.signal}）\n` +
+          `----- 子进程日志 -----\n${getLogTail() || '（无输出）'}\n----------------------`,
+      );
+    }
     try {
       const resp = await fetch(`http://127.0.0.1:${port}/auth/strategy`);
       if (resp.ok) return;
@@ -89,12 +155,16 @@ async function waitServiceReady(port, timeoutMs = 30000) {
     }
     await new Promise((r) => setTimeout(r, 500));
   }
-  throw new Error(`端口 ${port} 的服务实例启动超时`);
+  throw new Error(
+    `端口 ${port} 的服务实例启动超时（>${timeoutMs}ms）\n` +
+      `----- 子进程日志 -----\n${getLogTail() || '（无输出）'}\n----------------------`,
+  );
 }
 
 /** 优雅停止子进程 */
-function stopServiceInstance(child) {
+function stopServiceInstance(instance) {
   return new Promise((resolve) => {
+    const child = instance && instance.child;
     if (!child || child.killed) return resolve();
     child.once('exit', () => resolve());
     child.kill('SIGTERM');
@@ -313,7 +383,6 @@ async function main() {
   // 场景：通过环境变量 LDAP_URL 指向一个真实的 LDAP 服务器（测试内用 ldapjs 临时启动），
   // 验证真实 bind 认证链路，以及 bind 后 unbind + destroy 的资源释放时序不破坏正常认证。
   console.log('【7】真实 LDAP 服务器集成');
-  const LDAP_TEST_PORT = 3100;
   let ldapServer = null;
   let ldapService = null;
   try {
@@ -330,15 +399,21 @@ async function main() {
       return next(new ldap.InvalidCredentialsError('凭据无效'));
     });
     await new Promise((resolve) => ldapServer.listen(0, '127.0.0.1', resolve));
-    const ldapPort = ldapServer.address().port;
+    // 边界处理：listen 后 address() 可能返回 null（服务器异常关闭）或 string（unix socket）
+    const ldapAddr = ldapServer.address();
+    if (!ldapAddr || typeof ldapAddr === 'string') {
+      throw new Error('LDAP 测试服务器启动失败：address() 返回无效值');
+    }
+    const ldapPort = ldapAddr.port;
 
-    // 以服务实例方式启动应用，默认策略设为 ldap 并指向测试 LDAP 服务器
-    ldapService = startServiceInstance(LDAP_TEST_PORT, {
+    // 以服务实例方式启动应用：动态分配空闲端口，避免端口冲突导致启动失败
+    const ldapTestPort = await getFreePort();
+    ldapService = startServiceInstance(ldapTestPort, {
       LDAP_URL: `ldap://127.0.0.1:${ldapPort}`,
       DEFAULT_AUTH_STRATEGY: 'ldap',
     });
-    await waitServiceReady(LDAP_TEST_PORT);
-    const ldapBase = `http://127.0.0.1:${LDAP_TEST_PORT}`;
+    await waitServiceReady(ldapTestPort, ldapService);
+    const ldapBase = `http://127.0.0.1:${ldapTestPort}`;
 
     await test('真实 LDAP bind 认证成功（carol/carol123）', async () => {
       const { status, body } = await api('POST', '/auth/login', {
@@ -378,21 +453,27 @@ async function main() {
   // 场景：LDAP_URL 指向一个"黑洞"TCP 服务器（接受连接但永不响应），
   // 验证 bind 整体超时兜底生效：请求在合理时间内返回 401 而不是挂起。
   console.log('【8】第三方服务不可用防挂起');
-  const HANG_TEST_PORT = 3101;
   let blackhole = null;
   let hangService = null;
   try {
     // 黑洞服务器：接受连接后不做任何响应
     blackhole = net.createServer(() => undefined);
     await new Promise((resolve) => blackhole.listen(0, '127.0.0.1', resolve));
-    const blackholePort = blackhole.address().port;
+    // 边界处理：listen 后 address() 可能返回 null（服务器异常关闭）或 string（unix socket）
+    const blackholeAddr = blackhole.address();
+    if (!blackholeAddr || typeof blackholeAddr === 'string') {
+      throw new Error('黑洞服务器启动失败：address() 返回无效值');
+    }
+    const blackholePort = blackholeAddr.port;
 
-    hangService = startServiceInstance(HANG_TEST_PORT, {
+    // 动态分配空闲端口，避免端口冲突
+    const hangTestPort = await getFreePort();
+    hangService = startServiceInstance(hangTestPort, {
       LDAP_URL: `ldap://127.0.0.1:${blackholePort}`,
       DEFAULT_AUTH_STRATEGY: 'ldap',
     });
-    await waitServiceReady(HANG_TEST_PORT);
-    const hangBase = `http://127.0.0.1:${HANG_TEST_PORT}`;
+    await waitServiceReady(hangTestPort, hangService);
+    const hangBase = `http://127.0.0.1:${hangTestPort}`;
 
     await test('LDAP 服务器无响应时登录请求不挂起（超时返回 401）', async () => {
       const start = Date.now();
