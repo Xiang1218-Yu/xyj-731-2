@@ -32,17 +32,33 @@ export class LdapAuthStrategy implements AuthStrategy {
 
   constructor(private readonly config: ConfigService) {}
 
+  /**
+   * 读取必填的 LDAP 配置项
+   *
+   * 统一在运行时对环境变量做存在性校验，避免使用非空断言（!）掩盖配置缺失。
+   * LDAP 配置缺失会导致无法连接目录服务，应在启动/认证时尽早以明确错误暴露。
+   */
+  private requireConfig(key: string): string {
+    const value = this.config.get<string>(key);
+    if (value === undefined || value === null || value === '') {
+      throw new InternalServerErrorException(
+        `LDAP 配置缺失: ${key}，请检查 .env 中的相关环境变量`,
+      );
+    }
+    return value;
+  }
+
   async authenticate(credentials: CredentialPayload): Promise<AuthPrincipal> {
     const { username, password } = credentials;
     if (!username || !password) {
       throw new UnauthorizedException('LDAP 认证需要提供 username 和 password');
     }
 
-    const url = this.config.get<string>('ldap.url')!;
-    const bindDn = this.config.get<string>('ldap.bindDn')!;
-    const bindCredentials = this.config.get<string>('ldap.bindCredentials')!;
-    const searchBase = this.config.get<string>('ldap.searchBase')!;
-    const searchFilterTpl = this.config.get<string>('ldap.searchFilter')!;
+    const url = this.requireConfig('ldap.url');
+    const bindDn = this.requireConfig('ldap.bindDn');
+    const bindCredentials = this.requireConfig('ldap.bindCredentials');
+    const searchBase = this.requireConfig('ldap.searchBase');
+    const searchFilterTpl = this.requireConfig('ldap.searchFilter');
 
     // 将模板中的 {{username}} 替换为实际用户名，并做 LDAP 特殊字符转义
     const escapedUsername = this.escapeLdap(username);

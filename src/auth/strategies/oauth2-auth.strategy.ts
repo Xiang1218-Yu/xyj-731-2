@@ -1,4 +1,9 @@
-import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  InternalServerErrorException,
+  UnauthorizedException,
+  Logger,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 import { AuthStrategy } from './auth-strategy.interface';
@@ -29,13 +34,30 @@ export class OAuth2AuthStrategy implements AuthStrategy {
   constructor(private readonly config: ConfigService) {}
 
   /**
+   * 读取必填的 OAuth2 配置项
+   *
+   * 统一在运行时对环境变量做存在性校验，避免使用非空断言（!）掩盖配置缺失。
+   * 配置缺失属于服务端部署/配置错误，抛出 500 并给出明确的环境变量名提示，
+   * 比在后续 fetch/URL 拼装阶段产生晦涩的 undefined 错误更易于排查。
+   */
+  private requireConfig(key: string): string {
+    const value = this.config.get<string>(key);
+    if (value === undefined || value === null || value === '') {
+      throw new InternalServerErrorException(
+        `OAuth2 配置缺失: ${key}，请检查 .env 中的相关环境变量`,
+      );
+    }
+    return value;
+  }
+
+  /**
    * 构造授权服务器的授权地址
    * 前端可调用 GET /auth/oauth2/authorize 拿到该地址后重定向用户。
    */
   buildAuthorizeUrl(state?: string): string {
-    const authUrl = this.config.get<string>('oauth2.authUrl')!;
-    const clientId = this.config.get<string>('oauth2.clientId')!;
-    const callbackUrl = this.config.get<string>('oauth2.callbackUrl')!;
+    const authUrl = this.requireConfig('oauth2.authUrl');
+    const clientId = this.requireConfig('oauth2.clientId');
+    const callbackUrl = this.requireConfig('oauth2.callbackUrl');
     const params = new URLSearchParams({
       response_type: 'code',
       client_id: clientId,
@@ -52,10 +74,10 @@ export class OAuth2AuthStrategy implements AuthStrategy {
     }
 
     // 1. 用授权码换取 access_token
-    const tokenUrl = this.config.get<string>('oauth2.tokenUrl')!;
-    const clientId = this.config.get<string>('oauth2.clientId')!;
-    const clientSecret = this.config.get<string>('oauth2.clientSecret')!;
-    const callbackUrl = this.config.get<string>('oauth2.callbackUrl')!;
+    const tokenUrl = this.requireConfig('oauth2.tokenUrl');
+    const clientId = this.requireConfig('oauth2.clientId');
+    const clientSecret = this.requireConfig('oauth2.clientSecret');
+    const callbackUrl = this.requireConfig('oauth2.callbackUrl');
 
     let tokenResponse: any;
     try {
@@ -88,7 +110,7 @@ export class OAuth2AuthStrategy implements AuthStrategy {
     }
 
     // 2. 用 access_token 获取用户信息
-    const userInfoUrl = this.config.get<string>('oauth2.userInfoUrl')!;
+    const userInfoUrl = this.requireConfig('oauth2.userInfoUrl');
     let userInfo: any;
     try {
       const resp = await fetch(userInfoUrl, {

@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import * as bcrypt from 'bcryptjs';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { AuthPrincipal, TokenPair } from '../../common/interfaces/auth.interface';
 
 /**
@@ -89,19 +89,31 @@ export class TokenService {
   }
 
   /**
-   * 生成 refresh token 的 bcrypt 哈希
-   * 存到会话中，刷新时比对，避免明文落库
+   * 生成 refresh token 的摘要
+   *
+   * 设计说明：
+   * refresh token 本身是由 JWT 签发的高熵随机串（攻击者无法离线枚举/猜测），
+   * 因此不需要像用户密码那样使用 bcrypt 这种"慢哈希"来抵御暴力破解。
+   * 这里改用基于服务端密钥的 HMAC-SHA256：
+   *  - 性能比 bcrypt(10 轮) 高数个数量级，避免高并发刷新场景的 CPU 瓶颈；
+   *  - 存储的是带密钥的摘要而非明文，即使会话存储泄漏也无法直接还原 token；
+   *  - 比对时使用 timingSafeEqual 防止时序攻击。
+   *
+   * 注意：用户密码仍然应该使用 bcrypt/argon2 等慢哈希（见 JwtAuthStrategy）。
    */
-  async hashRefreshToken(refreshToken: string): Promise<string> {
-    return bcrypt.hash(refreshToken, 10);
+  hashRefreshToken(refreshToken: string): string {
+    const secret = this.config.get<string>('jwt.secret') || '';
+    return createHmac('sha256', secret).update(refreshToken).digest('hex');
   }
 
-  /** 比对 refresh token 与会话中存储的哈希 */
-  async compareRefreshToken(
-    refreshToken: string,
-    hash: string,
-  ): Promise<boolean> {
-    return bcrypt.compare(refreshToken, hash);
+  /** 比对 refresh token 与会话中存储的摘要（常量时间比较，防时序攻击） */
+  compareRefreshToken(refreshToken: string, hash: string): boolean {
+    if (!hash) return false;
+    const expected = Buffer.from(this.hashRefreshToken(refreshToken), 'hex');
+    const actual = Buffer.from(hash, 'hex');
+    // 长度不一致时 timingSafeEqual 会抛错，需先判断长度
+    if (expected.length !== actual.length) return false;
+    return timingSafeEqual(expected, actual);
   }
 
   private async signToken(

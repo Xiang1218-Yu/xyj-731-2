@@ -1,4 +1,10 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+  OnModuleInit,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AuthStrategy } from './auth-strategy.interface';
 import { JwtAuthStrategy } from './jwt-auth.strategy';
@@ -60,7 +66,8 @@ export class AuthStrategyContext implements OnModuleInit {
    */
   setStrategy(type: AuthStrategyType): void {
     if (!this.strategies.has(type)) {
-      throw new Error(`不支持的认证策略: ${type}`);
+      // 切换到一个未注册的策略属于客户端请求参数错误，返回 400
+      throw new BadRequestException(`不支持的认证策略: ${type}`);
     }
     this.currentStrategy = type;
   }
@@ -86,7 +93,10 @@ export class AuthStrategyContext implements OnModuleInit {
     const strategyType = credentials.strategy || this.currentStrategy;
     const strategy = this.strategies.get(strategyType);
     if (!strategy) {
-      throw new Error(`未找到认证策略: ${strategyType}`);
+      // 未找到对应策略通常意味着系统配置异常，返回 401 表明无法完成认证
+      throw new UnauthorizedException(
+        `未找到认证策略: ${strategyType}，请检查系统配置`,
+      );
     }
     return strategy.authenticate(credentials);
   }
@@ -95,7 +105,8 @@ export class AuthStrategyContext implements OnModuleInit {
   getStrategy<T extends AuthStrategy>(type: AuthStrategyType): T {
     const strategy = this.strategies.get(type);
     if (!strategy) {
-      throw new Error(`未找到认证策略: ${type}`);
+      // 代码层面请求了一个未注册的策略，属于服务端资源/配置缺失，返回 404
+      throw new NotFoundException(`未找到认证策略: ${type}`);
     }
     return strategy as T;
   }

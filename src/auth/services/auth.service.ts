@@ -70,9 +70,10 @@ export class AuthService {
       session.sessionId,
     );
 
-    // 将 refresh token 的 bcrypt 哈希回填到会话，避免明文落库
-    const refreshTokenHash =
-      await this.tokenService.hashRefreshToken(tokens.refreshToken);
+    // 将 refresh token 的摘要回填到会话，避免明文落库
+    const refreshTokenHash = this.tokenService.hashRefreshToken(
+      tokens.refreshToken,
+    );
     await this.sessionService.updateSession(session.sessionId, {
       refreshTokenHash,
     });
@@ -118,8 +119,8 @@ export class AuthService {
       throw new UnauthorizedException('会话已失效，请重新登录');
     }
 
-    // 校验 refresh token 哈希
-    const valid = await this.tokenService.compareRefreshToken(
+    // 校验 refresh token 摘要
+    const valid = this.tokenService.compareRefreshToken(
       refreshToken,
       session.refreshTokenHash,
     );
@@ -158,8 +159,8 @@ export class AuthService {
       newSession.sessionId,
     );
 
-    // 回填新 refresh token 哈希
-    const newHash = await this.tokenService.hashRefreshToken(tokens.refreshToken);
+    // 回填新 refresh token 摘要
+    const newHash = this.tokenService.hashRefreshToken(tokens.refreshToken);
     await this.sessionService.updateSession(newSession.sessionId, {
       refreshTokenHash: newHash,
     });
