@@ -173,6 +173,34 @@ async function main() {
     assert(res.status === 400, `期望 400，实际 ${res.status}`);
   });
 
+  // ---------- 7. DTO 条件校验（问题 8）----------
+  console.log('\n[7] 登录 DTO 条件校验');
+  await test('JWT 策略缺少 password 返回 400', async () => {
+    const res = await request('POST', '/auth/login', {
+      body: { strategy: 'jwt', username: 'admin' },
+    });
+    assert(res.status === 400, `期望 400，实际 ${res.status}`);
+  });
+
+  await test('LDAP 策略缺少 username 返回 400', async () => {
+    const res = await request('POST', '/auth/login', {
+      body: { strategy: 'ldap', password: 'secret' },
+    });
+    assert(res.status === 400, `期望 400，实际 ${res.status}`);
+  });
+
+  await test('OAuth2 策略缺少 code 返回 400', async () => {
+    const res = await request('POST', '/auth/login', {
+      body: { strategy: 'oauth2' },
+    });
+    assert(res.status === 400, `期望 400，实际 ${res.status}`);
+  });
+
+  await test('不传 strategy 时按默认(jwt)要求 username/password（缺失返回 400）', async () => {
+    const res = await request('POST', '/auth/login', { body: {} });
+    assert(res.status === 400, `期望 400，实际 ${res.status}`);
+  });
+
   // ---------- 汇总 ----------
   console.log('\n=== 测试结果 ===');
   console.log(`通过：${passed}，失败：${failed}`);

@@ -19,6 +19,8 @@ export class AuthMiddleware implements NestMiddleware {
 
   async use(req: Request, res: Response, next: NextFunction): Promise<void> {
     const authHeader = req.headers['authorization'];
+    const clientIp = req.ip || req.socket?.remoteAddress || 'unknown';
+
     if (authHeader && typeof authHeader === 'string') {
       const [type, token] = authHeader.split(' ');
       if (type === 'Bearer' && token) {
@@ -33,13 +35,22 @@ export class AuthMiddleware implements NestMiddleware {
             provider: payload.provider,
             sessionId: payload.sid,
           };
-        } catch {
-          // 预解析失败不拦截，留给 AuthGuard 决策
+        } catch (err) {
+          // 安全改造（问题 4）：预解析失败不再静默忽略，需记录失败原因用于安全审计。
+          // 此处仅记录，不直接拦截，最终由 AuthGuard 决策，避免影响公开接口。
+          this.logger.warn(
+            `令牌预解析失败：${err?.message || err} | ${req.method} ${req.originalUrl} | ip=${clientIp}`,
+          );
         }
+      } else {
+        // 携带了 Authorization 头但格式不合法，记录以便审计
+        this.logger.warn(
+          `非法的 Authorization 头格式 | ${req.method} ${req.originalUrl} | ip=${clientIp}`,
+        );
       }
     }
     // 简单访问日志，便于审计
-    this.logger.debug(`${req.method} ${req.originalUrl}`);
+    this.logger.debug(`${req.method} ${req.originalUrl} | ip=${clientIp}`);
     next();
   }
 }

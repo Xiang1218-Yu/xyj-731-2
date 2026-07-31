@@ -15,6 +15,7 @@ import { LdapStrategy } from './strategies/ldap.strategy';
 import { AuthGuard } from './guards/auth.guard';
 import { PermissionGuard } from './guards/permission.guard';
 import { AuthMiddleware } from './middleware/auth.middleware';
+import { UsersModule } from '../users/users.module';
 
 /**
  * 认证模块：聚合策略、服务、守卫与控制器。
@@ -22,7 +23,7 @@ import { AuthMiddleware } from './middleware/auth.middleware';
  * 便于 access / refresh 使用不同过期时间。
  */
 @Module({
-  imports: [JwtModule.register({})],
+  imports: [JwtModule.register({}), UsersModule],
   controllers: [AuthController],
   providers: [
     // 业务服务

@@ -53,20 +53,28 @@ export class LdapStrategy implements IAuthStrategy {
         raw: { dn: bindDn },
       };
     } catch (err) {
-      // 连接类错误（服务器不可达）在演示环境下降级为模拟认证
+      // 安全改造（问题 3）：连接失败不再默认降级为"任意口令通过"的模拟认证。
+      // 仅当显式开启演示模式（LDAP_ALLOW_MOCK=true）时才允许模拟，
+      // 且模拟时也要求提供了非空口令，绝不无条件放行。
       if (this.isConnectionError(err)) {
-        this.logger.warn(
-          `无法连接 LDAP 服务器（${err.message}），返回模拟用户（演示模式）`,
-        );
-        return {
-          userId: `ldap-${username}`,
-          username,
-          email: `${username}@example.com`,
-          roles: ['user'],
-          permissions: ['user:read'],
-          provider: AuthStrategyType.LDAP,
-          raw: { dn: bindDn, mock: true },
-        };
+        const cfg2 = this.configService.get('ldap');
+        if (cfg2.allowMock) {
+          this.logger.warn(
+            `LDAP 演示模式已开启（LDAP_ALLOW_MOCK=true），服务器不可达，返回模拟用户。切勿在生产启用！`,
+          );
+          return {
+            userId: `ldap-${username}`,
+            username,
+            email: `${username}@example.com`,
+            roles: ['user'],
+            permissions: ['user:read'],
+            provider: AuthStrategyType.LDAP,
+            raw: { dn: bindDn, mock: true },
+          };
+        }
+        // 未开启演示模式：连接失败视为服务不可用，直接拒绝，绝不放行
+        this.logger.error(`无法连接 LDAP 服务器，拒绝认证：${err.message}`);
+        throw new UnauthorizedException('LDAP 认证服务不可用');
       }
       this.logger.warn(`LDAP 认证失败：${err.message}`);
       throw new UnauthorizedException('LDAP 用户名或密码错误');

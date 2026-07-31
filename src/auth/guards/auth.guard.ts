@@ -43,6 +43,11 @@ export class AuthGuard implements CanActivate {
     // 校验 access token
     const payload = await this.tokenService.verifyAccessToken(token);
 
+    // 校验会话是否已被吊销（黑名单，问题 7）——即便令牌本身未过期也应拒绝
+    if (await this.sessionService.isRevoked(payload.sid)) {
+      throw new UnauthorizedException('会话已被吊销，请重新登录');
+    }
+
     // 校验会话是否仍然有效（实现登出即时生效）
     const session = await this.sessionService.getSession(payload.sid);
     if (!session) {

@@ -54,10 +54,28 @@ export class OAuth2Strategy implements IAuthStrategy {
 
     const cfg = this.configService.get('oauth2');
 
-    // 未配置真实授权服务器时，返回模拟用户，便于本地演示与测试
-    if (!cfg.tokenUrl || cfg.tokenUrl.includes('example.com')) {
-      this.logger.warn('未配置真实 OAuth2 服务器，返回模拟用户信息（演示模式）');
-      return this.buildMockUser(code);
+    // 判断是否配置了真实授权服务器
+    const hasRealServer =
+      cfg.tokenUrl &&
+      !cfg.tokenUrl.includes('example.com') &&
+      cfg.userInfoUrl &&
+      cfg.clientId &&
+      cfg.clientSecret;
+
+    if (!hasRealServer) {
+      // 安全改造（问题 2）：未配置真实服务器时，绝不放行未经校验的授权码。
+      // 仅当显式开启演示模式（OAUTH2_ALLOW_MOCK=true）时才返回模拟用户，
+      // 否则直接拒绝，避免任意 code 换取有效身份。
+      if (cfg.allowMock) {
+        this.logger.warn(
+          'OAuth2 演示模式已开启（OAUTH2_ALLOW_MOCK=true），返回模拟用户。切勿在生产启用！',
+        );
+        return this.buildMockUser(code);
+      }
+      this.logger.error('OAuth2 未配置真实授权服务器，拒绝认证');
+      throw new UnauthorizedException(
+        'OAuth2 认证不可用：服务端未正确配置授权服务器',
+      );
     }
 
     try {

@@ -7,8 +7,9 @@
 - **多认证策略**：内置 JWT、OAuth2.0（授权码模式）、LDAP 三种策略。
 - **策略模式 + 运行时切换**：所有策略实现统一的 `IAuthStrategy` 接口，通过 `AuthStrategyRegistry` 注册；登录时以请求体 `strategy` 字段在运行时动态选择，未传则使用默认策略。
 - **统一接口**：`login` / `logout` / `refresh` 屏蔽策略差异，令牌由 `TokenService` 统一签发（access + refresh，含刷新令牌轮换）。
-- **Redis 会话存储**：会话状态存于 Redis，支持 TTL 过期与登出即时失效；Redis 不可用时自动降级为内存存储（仅供开发/演示）。
-- **框架级权限校验**：`AuthGuard`（认证）+ `PermissionGuard`（`@Roles` / `@Permissions`）+ `AuthMiddleware`（令牌预解析与日志），仅框架层，不含具体业务。
+- **Redis 会话存储**：会话状态存于 Redis，支持 TTL 过期、登出即时失效与会话吊销黑名单（跨实例广播）。默认必须依赖真实 Redis；仅当显式 `REDIS_ALLOW_MEMORY_FALLBACK=true` 时才允许内存降级（本地开发/演示），否则连接失败将 fail-fast 终止启动。
+- **框架级权限校验**：`AuthGuard`（认证 + 吊销黑名单校验）+ `PermissionGuard`（`@Roles` / `@Permissions`）+ `AuthMiddleware`（令牌预解析、失败原因审计日志），仅框架层，不含具体业务。
+- **安全默认**：密码以 bcrypt 哈希存储、不硬编码明文；LDAP/OAuth2 在无真实服务端时默认拒绝，模拟仅在 `*_ALLOW_MOCK=true` 时开启；登录 DTO 按策略条件校验必填字段。
 - **Swagger 文档**：启动后访问 `/api-docs`。
 - **Node 原生测试脚本**：`test/run-tests.js`，无第三方测试框架依赖。
 
@@ -16,8 +17,9 @@
 
 ```
 src/
-├── config/configuration.ts        # 统一配置加载
-├── redis/                          # Redis 全局模块（含内存降级）
+├── config/configuration.ts        # 统一配置加载（含安全开关）
+├── redis/                          # Redis 全局模块（可选内存降级 + 条件删除 + 广播）
+├── users/                          # 用户仓储（bcrypt 密码校验，替代硬编码明文）
 ├── auth/
 │   ├── interfaces/                 # IAuthStrategy、用户/会话/令牌类型
 │   ├── strategies/                 # jwt / oauth2 / ldap 三种策略实现
@@ -59,12 +61,21 @@ npm run build && npm run start:prod
 
 ## 运行测试
 
-先启动服务，然后在另一个终端执行：
+本机若无 Redis / LDAP / OAuth2 服务，可开启开发降级与演示模式启动服务：
 
 ```bash
-npm run test:api
-# 指定端口：BASE_URL=http://localhost:3100 node test/run-tests.js
+# 开发模式启动（本机无 Redis 时需开启内存降级；演示 LDAP/OAuth2 需开启 mock）
+PORT=3100 REDIS_ALLOW_MEMORY_FALLBACK=true LDAP_ALLOW_MOCK=true OAUTH2_ALLOW_MOCK=true npm run start:prod
 ```
+
+然后在另一个终端执行：
+
+```bash
+BASE_URL=http://localhost:3100 npm run test:api
+# 或 BASE_URL=http://localhost:3100 node test/run-tests.js
+```
+
+> 生产环境请勿开启上述任何 `*_ALLOW_*` 开关。
 
 ## 主要接口
 
@@ -86,7 +97,7 @@ npm run test:api
 | admin | admin123 | admin | user:read, user:write, system:manage |
 | user | user123 | user | user:read |
 
-> OAuth2 与 LDAP 在未配置真实服务端时以演示模式返回模拟用户；生产环境请在 `.env` 中配置真实端点。
+> OAuth2 与 LDAP 默认在未配置真实服务端时**拒绝**认证，绝不放行未经校验的凭证。仅当显式设置 `OAUTH2_ALLOW_MOCK=true` / `LDAP_ALLOW_MOCK=true` 时才返回模拟用户（演示专用）。生产环境请在 `.env` 中配置真实端点并保持 mock 关闭。
 
 ## 登录示例
 

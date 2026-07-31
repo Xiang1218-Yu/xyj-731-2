@@ -25,6 +25,10 @@ export default () => ({
     password: process.env.REDIS_PASSWORD || undefined,
     db: parseInt(process.env.REDIS_DB, 10) || 0,
     sessionTtl: parseInt(process.env.SESSION_TTL, 10) || 604800,
+    // 是否允许在 Redis 不可用时降级为进程内内存存储。
+    // 默认关闭：生产/分布式部署下必须依赖真实 Redis，避免会话状态不一致。
+    // 仅当显式设置 REDIS_ALLOW_MEMORY_FALLBACK=true 时才启用（用于本地开发/演示）。
+    allowMemoryFallback: process.env.REDIS_ALLOW_MEMORY_FALLBACK === 'true',
   },
 
   // OAuth2.0（授权码模式）配置
@@ -38,6 +42,9 @@ export default () => ({
       process.env.OAUTH2_REDIRECT_URI ||
       'http://localhost:3000/auth/oauth2/callback',
     scope: process.env.OAUTH2_SCOPE || 'openid profile email',
+    // 是否允许在未配置真实授权服务器时返回模拟用户（演示专用，默认关闭）。
+    // 关闭时若未配置 tokenUrl，OAuth2 登录将直接失败，绝不放行未经校验的授权码。
+    allowMock: process.env.OAUTH2_ALLOW_MOCK === 'true',
   },
 
   // LDAP 配置
@@ -48,5 +55,14 @@ export default () => ({
       'uid={{username}},ou=people,dc=example,dc=com',
     searchBase: process.env.LDAP_SEARCH_BASE || 'ou=people,dc=example,dc=com',
     searchFilter: process.env.LDAP_SEARCH_FILTER || '(uid={{username}})',
+    // 是否允许在 LDAP 服务器不可达时降级为模拟认证（演示专用，默认关闭）。
+    // 关闭时连接失败将直接拒绝登录，绝不允许任意用户名/密码通过。
+    allowMock: process.env.LDAP_ALLOW_MOCK === 'true',
+  },
+
+  // 本地演示用户（仅当启用时注入 JWT 策略）。
+  // 密码以 bcrypt 哈希存储，绝不使用明文。生产环境请关闭并接入真实用户存储。
+  demoUsers: {
+    enabled: process.env.DEMO_USERS_ENABLED !== 'false',
   },
 });
