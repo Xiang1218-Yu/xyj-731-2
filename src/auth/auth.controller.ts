@@ -50,9 +50,12 @@ export class AuthController {
   @ApiBearerAuth()
   @ApiOperation({ summary: '统一登出' })
   @ApiResponse({ status: 204, description: '登出成功' })
+  @ApiResponse({ status: 400, description: '缺少会话标识' })
   @ApiResponse({ status: 401, description: '未认证或会话已失效' })
+  @ApiResponse({ status: 404, description: '会话不存在或已过期' })
   async logout(@Request() req) {
-    await this.authService.logout(req.user.sessionId);
+    // 空值兜底：守卫异常放行时也能得到友好提示而非 500
+    await this.authService.logout(req.user?.sessionId);
   }
 
   /**

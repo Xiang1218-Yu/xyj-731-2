@@ -1,5 +1,7 @@
 import {
+  BadRequestException,
   Injectable,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -46,9 +48,25 @@ export class AuthService {
 
   /**
    * 统一登出：删除服务端会话，使访问令牌与刷新令牌同时失效
+   * 包含空值与存在性校验，给出友好的错误提示
    * @param sessionId 当前会话 ID（从访问令牌中解析）
    */
-  async logout(sessionId: string): Promise<void> {
+  async logout(sessionId?: string): Promise<void> {
+    // 空值校验：令牌中未携带会话标识时给出明确提示
+    if (!sessionId) {
+      throw new BadRequestException(
+        '登出失败：缺少会话标识，请重新登录后再执行登出操作',
+      );
+    }
+
+    // 存在性校验：会话不存在时提示，而不是静默成功
+    const session = await this.sessionService.get(sessionId);
+    if (!session) {
+      throw new NotFoundException(
+        '登出失败：会话不存在或已过期，无需重复登出',
+      );
+    }
+
     await this.sessionService.delete(sessionId);
   }
 

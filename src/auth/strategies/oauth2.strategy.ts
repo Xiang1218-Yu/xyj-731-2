@@ -6,6 +6,9 @@ import {
 } from './auth-strategy.interface';
 import configuration from '../../config/configuration';
 
+/** 调用第三方 userinfo 端点的超时时间（毫秒），防止第三方服务不可用时请求挂起 */
+const OAUTH2_REQUEST_TIMEOUT_MS = 5000;
+
 /**
  * OAuth2.0 认证策略
  * 使用第三方颁发的 access_token 调用认证服务器的 userinfo 端点换取用户信息。
@@ -46,9 +49,11 @@ export class OAuth2StrategyImpl implements IAuthStrategy {
     const userinfoUrl = this.config.oauth2.userinfoUrl;
     if (userinfoUrl) {
       // 真实模式：携带 Bearer Token 调用认证服务器 userinfo 端点
+      // AbortSignal.timeout 限制整体请求时长，防止第三方服务不可用时请求挂起
       try {
         const resp = await fetch(userinfoUrl, {
           headers: { Authorization: `Bearer ${accessToken}` },
+          signal: AbortSignal.timeout(OAUTH2_REQUEST_TIMEOUT_MS),
         });
         if (!resp.ok) {
           this.logger.warn(`OAuth2 userinfo 校验失败: HTTP ${resp.status}`);
@@ -63,7 +68,11 @@ export class OAuth2StrategyImpl implements IAuthStrategy {
           provider: this.name,
         };
       } catch (err) {
-        this.logger.error(`OAuth2 userinfo 请求异常: ${(err as Error).message}`);
+        // 超时（TimeoutError）或网络异常统一按认证失败处理，并给出明确日志
+        const isTimeout = (err as Error).name === 'TimeoutError';
+        this.logger.error(
+          `OAuth2 userinfo 请求${isTimeout ? '超时' : '异常'}: ${(err as Error).message}`,
+        );
         return null;
       }
     }

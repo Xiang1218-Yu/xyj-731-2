@@ -1,11 +1,12 @@
 import { Module } from '@nestjs/common';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
 import configuration from './config/configuration';
 import { SessionModule } from './session/session.module';
 import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from './auth/guards/permissions.guard';
+import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor';
 
 const config = configuration();
 
@@ -29,6 +30,8 @@ const config = configuration();
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     // 全局权限校验守卫：基于 @RequirePermissions 元数据做鉴权
     { provide: APP_GUARD, useClass: PermissionsGuard },
+    // 全局请求超时拦截器：限制请求整体处理时长，超时返回 408
+    { provide: APP_INTERCEPTOR, useClass: TimeoutInterceptor },
   ],
 })
 export class AppModule {}

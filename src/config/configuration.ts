@@ -16,6 +16,9 @@ export default () => ({
   // 刷新令牌过期时间（秒）
   refreshTokenTtl: parseInt(process.env.REFRESH_TOKEN_TTL, 10) || 7 * 24 * 3600,
 
+  // 全局请求超时时间（毫秒），超时返回 408，防止请求挂起
+  requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 10000,
+
   // Redis 会话存储配置
   redis: {
     host: process.env.REDIS_HOST || '127.0.0.1',
