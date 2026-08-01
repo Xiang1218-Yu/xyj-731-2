@@ -19,7 +19,10 @@ import {
   AuthResult,
   AuthenticatedUser,
 } from '../../common/interfaces/authenticated-user.interface';
-import { getRequiredString } from '../../common/utils/config.util';
+import {
+  getRequiredBoolean,
+  getRequiredString,
+} from '../../common/utils/config.util';
 import { UsersService } from '../../users/users.service';
 import { AuthStrategy } from './auth-strategy.interface';
 
@@ -224,7 +227,7 @@ export class LdapStrategy implements AuthStrategy {
   ]);
 
   private shouldFallback(err: unknown): boolean {
-    if (!this.configService.get<boolean>('allowLocalFallback')) {
+    if (!getRequiredBoolean(this.configService, 'allowLocalFallback')) {
       return false;
     }
     // 业务层显式抛出的认证失败绝不回退

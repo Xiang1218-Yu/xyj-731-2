@@ -13,7 +13,11 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
-import { getRequiredNumber, getRequiredString } from '../common/utils/config.util';
+import {
+  getOptionalString,
+  getRequiredNumber,
+  getRequiredString,
+} from '../common/utils/config.util';
 import { SessionData } from '../common/interfaces/authenticated-user.interface';
 import { SessionStore } from './session-store.interface';
 
@@ -32,16 +36,33 @@ export class RedisSessionStore
    * 使用 lazyConnect，避免在 Redis 不可用时阻塞应用启动
    */
   async onModuleInit(): Promise<void> {
-    // 显式读取并校验必填配置项，不使用非空断言
+    // 显式读取并校验必填配置项，不使用非空断言。
+    // host/port/keyPrefix/db 均有默认值，但仍通过共享工具校验，防止默认值被意外移除。
     const host = getRequiredString(this.configService, 'redis.host');
-    const port = getRequiredNumber(this.configService, 'redis.port');
+    const port = getRequiredNumber(this.configService, 'redis.port', {
+      min: 1,
+      max: 65535,
+    });
+    const db = getRequiredNumber(this.configService, 'redis.db', {
+      min: 0,
+      max: 15,
+    });
+    const keyPrefix = getRequiredString(
+      this.configService,
+      'redis.keyPrefix',
+    );
+    // password 本身允许为空（无密码 Redis），使用可选读取
+    const password = getOptionalString(
+      this.configService,
+      'redis.password',
+    );
 
     this.client = new Redis({
       host,
       port,
-      password: this.configService.get<string | undefined>('redis.password'),
-      db: this.configService.get<number>('redis.db'),
-      keyPrefix: this.configService.get<string>('redis.keyPrefix'),
+      password,
+      db,
+      keyPrefix,
       lazyConnect: true,
       // 失败后不自动重试过多次，交给降级逻辑处理
       retryStrategy: (times) => {

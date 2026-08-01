@@ -19,7 +19,10 @@ import {
   AuthResult,
   AuthenticatedUser,
 } from '../../common/interfaces/authenticated-user.interface';
-import { getRequiredString } from '../../common/utils/config.util';
+import {
+  getRequiredBoolean,
+  getRequiredString,
+} from '../../common/utils/config.util';
 import { UsersService } from '../../users/users.service';
 import { AuthStrategy } from './auth-strategy.interface';
 
@@ -267,8 +270,8 @@ export class OAuth2Strategy implements AuthStrategy {
   ]);
 
   private shouldFallback(err: unknown): boolean {
-    // 未启用本地回退时直接拒绝
-    if (!this.configService.get<boolean>('allowLocalFallback')) {
+    // 未启用本地回退时直接拒绝（使用共享工具校验布尔配置）
+    if (!getRequiredBoolean(this.configService, 'allowLocalFallback')) {
       return false;
     }
 

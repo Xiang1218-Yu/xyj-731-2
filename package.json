@@ -12,6 +12,8 @@
     "start:prod": "node dist/main",
     "lint": "eslint \"{src,test}/**/*.ts\" --fix",
     "test": "jest --config ./test/jest-e2e.json --runInBand",
+    "test:unit": "jest --config ./test/jest-unit.json --runInBand",
+    "test:all": "npm run test:unit && npm test",
     "test:scripts": "node test/scripts/run-all.js"
   },
   "dependencies": {

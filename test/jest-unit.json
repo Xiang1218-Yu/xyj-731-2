@@ -1,0 +1,13 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": "..",
+  "testEnvironment": "node",
+  "testRegex": "\\.spec\\.ts$",
+  "transform": {
+    "^.+\\.ts$": "ts-jest"
+  },
+  "setupFiles": ["<rootDir>/test/setup-unit.ts"],
+  "moduleDirectories": ["node_modules", "<rootDir>"],
+  "collectCoverageFrom": ["src/**/*.ts", "!src/main.ts"],
+  "testTimeout": 15000
+}

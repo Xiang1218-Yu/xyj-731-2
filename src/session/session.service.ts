@@ -15,6 +15,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 import { ConfigurationException } from '../common/exceptions/configuration.exception';
+import { getRequiredBoolean, getRequiredNumber } from '../common/utils/config.util';
 import { SessionData } from '../common/interfaces/authenticated-user.interface';
 import { MemorySessionStore } from './memory-session.store';
 import { RedisSessionStore } from './redis-session.store';
@@ -31,19 +32,12 @@ export class SessionService implements OnModuleInit {
     private readonly memoryStore: MemorySessionStore,
     private readonly configService: ConfigService,
   ) {
-    // 显式读取并校验会话 TTL，不使用非空断言
-    const ttl = this.configService.get<number>('redis.sessionTtl');
-    if (
-      ttl === undefined ||
-      ttl === null ||
-      !Number.isFinite(ttl) ||
-      ttl <= 0
-    ) {
-      throw new ConfigurationException(
-        `SESSION_TTL 配置非法（当前值: ${process.env.SESSION_TTL}），必须为正整数（秒）`,
-      );
-    }
-    this.sessionTtl = ttl;
+    // 使用共享工具读取并校验会话 TTL（必须为正整数秒），不使用非空断言
+    this.sessionTtl = getRequiredNumber(
+      this.configService,
+      'redis.sessionTtl',
+      { min: 1 },
+    );
   }
 
   /**
@@ -60,8 +54,11 @@ export class SessionService implements OnModuleInit {
       return;
     }
 
-    const fallbackEnabled =
-      this.configService.get<boolean>('redis.fallbackMemory');
+    // 使用共享工具读取并校验降级开关
+    const fallbackEnabled = getRequiredBoolean(
+      this.configService,
+      'redis.fallbackMemory',
+    );
 
     if (fallbackEnabled) {
       this.store = this.memoryStore;

@@ -39,9 +39,9 @@ export class JwtPassportStrategy extends PassportStrategy(
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       // 不在这里忽略过期，交给校验逻辑统一处理
       ignoreExpiration: false,
-      // 显式校验密钥配置存在性，不使用非空断言
+      // 显式校验密钥与签发者配置存在性，不使用非空断言
       secretOrKey: getRequiredString(configService, 'jwt.secret'),
-      issuer: configService.get<string>('jwt.issuer'),
+      issuer: getRequiredString(configService, 'jwt.issuer'),
     });
   }
 
