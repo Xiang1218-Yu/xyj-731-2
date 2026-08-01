@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { RedisService } from '../../redis/redis.service';
@@ -18,18 +18,57 @@ export const SESSION_REVOKED_CHANNEL = 'session:revoked';
  * - user-sessions:{userId}      -> 该用户的当前会话 ID（用于按用户维度管理 / 吊销）
  * - session-blacklist:{sid}     -> 会话吊销标记（问题 7：显式黑名单，带 TTL）
  *
+ * 吊销事件通过 SESSION_REVOKED_CHANNEL 广播；本服务在启动时订阅该频道（问题 1），
+ * 收到事件后在本实例维护一份短时的"已吊销"本地缓存，作为 Redis 黑名单之前的快速拦截，
+ * 并可在此扩展本地缓存清理等响应逻辑。
+ *
  * 所有会话都带 TTL（配置项 SESSION_TTL），到期自动清理。
  */
 @Injectable()
-export class SessionService {
+export class SessionService implements OnModuleInit {
   private readonly logger = new Logger(SessionService.name);
   private readonly ttl: number;
+
+  // 本地已吊销缓存：sessionId -> 加入时间（ms）。用于跨实例事件到达后的快速本地拦截。
+  private readonly localRevoked = new Map<string, number>();
 
   constructor(
     private readonly redisService: RedisService,
     private readonly configService: ConfigService,
   ) {
     this.ttl = this.configService.get('redis').sessionTtl;
+  }
+
+  /**
+   * 模块初始化：订阅会话吊销频道（问题 1）。
+   * 任一实例吊销会话后，所有实例都会收到事件并同步更新本地缓存 / 执行清理。
+   */
+  async onModuleInit(): Promise<void> {
+    await this.redisService.subscribe(SESSION_REVOKED_CHANNEL, (sessionId) => {
+      this.onSessionRevoked(sessionId);
+    });
+  }
+
+  /**
+   * 收到吊销事件的处理器（本实例侧响应）。
+   * - 记入本地已吊销缓存，供 isRevoked 快速命中，减少对 Redis 的往返依赖。
+   * - 预留清理本地相关缓存的位置（如按用户缓存的会话信息）。
+   */
+  private onSessionRevoked(sessionId: string): void {
+    this.localRevoked.set(sessionId, Date.now());
+    this.logger.debug(`收到会话吊销事件，已更新本地缓存：sid=${sessionId}`);
+    // 惰性清理：移除超过 TTL 的本地记录，避免 Map 无限增长
+    this.evictExpiredLocalRevoked();
+  }
+
+  /** 清理本地吊销缓存中已超过 TTL 的条目 */
+  private evictExpiredLocalRevoked(): void {
+    const expireBefore = Date.now() - this.ttl * 1000;
+    for (const [sid, addedAt] of this.localRevoked) {
+      if (addedAt < expireBefore) {
+        this.localRevoked.delete(sid);
+      }
+    }
   }
 
   /**
@@ -124,12 +163,25 @@ export class SessionService {
    */
   async revokeSession(sessionId: string): Promise<void> {
     await this.redisService.set(this.blacklistKey(sessionId), '1', this.ttl);
-    await this.redisService.publish(SESSION_REVOKED_CHANNEL, sessionId);
-    this.logger.log(`会话已吊销并广播：sid=${sessionId}`);
+    // 立即写入本实例本地缓存（广播回环到达前也能拦截）
+    this.localRevoked.set(sessionId, Date.now());
+    const receivers = await this.redisService.publish(
+      SESSION_REVOKED_CHANNEL,
+      sessionId,
+    );
+    this.logger.log(
+      `会话已吊销并广播：sid=${sessionId}，通知订阅者数=${receivers}`,
+    );
   }
 
-  /** 判断会话是否已被吊销（黑名单校验，供守卫在校验令牌时调用） */
+  /**
+   * 判断会话是否已被吊销。
+   * 先查本地已吊销缓存（O(1)，由订阅事件同步），未命中再回退到 Redis 黑名单。
+   */
   async isRevoked(sessionId: string): Promise<boolean> {
+    if (this.localRevoked.has(sessionId)) {
+      return true;
+    }
     const flag = await this.redisService.get(this.blacklistKey(sessionId));
     return flag === '1';
   }

@@ -43,4 +43,10 @@ async function bootstrap() {
   console.log(`Swagger 文档：http://localhost:${port}/api-docs`);
 }
 
-bootstrap();
+bootstrap().catch((err) => {
+  // 启动失败（如 Redis 不可用且未开启降级）时，输出简洁的致命信息并退出，
+  // 避免向终端抛出冗长且令人误解的底层堆栈。
+  // eslint-disable-next-line no-console
+  console.error(`服务启动失败：${err?.message || err}`);
+  process.exit(1);
+});

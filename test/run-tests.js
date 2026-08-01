@@ -201,6 +201,27 @@ async function main() {
     assert(res.status === 400, `期望 400，实际 ${res.status}`);
   });
 
+  await test('username 超长返回 400（边界校验）', async () => {
+    const res = await request('POST', '/auth/login', {
+      body: { strategy: 'jwt', username: 'a'.repeat(65), password: 'x' },
+    });
+    assert(res.status === 400, `期望 400，实际 ${res.status}`);
+  });
+
+  await test('password 超长返回 400（边界校验，防 bcrypt DoS）', async () => {
+    const res = await request('POST', '/auth/login', {
+      body: { strategy: 'jwt', username: 'admin', password: 'p'.repeat(129) },
+    });
+    assert(res.status === 400, `期望 400，实际 ${res.status}`);
+  });
+
+  await test('空白 username 返回 400（trim 后为空）', async () => {
+    const res = await request('POST', '/auth/login', {
+      body: { strategy: 'jwt', username: '   ', password: 'admin123' },
+    });
+    assert(res.status === 400, `期望 400，实际 ${res.status}`);
+  });
+
   // ---------- 汇总 ----------
   console.log('\n=== 测试结果 ===');
   console.log(`通过：${passed}，失败：${failed}`);
