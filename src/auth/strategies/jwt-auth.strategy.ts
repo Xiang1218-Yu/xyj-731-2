@@ -6,6 +6,7 @@ import {
   AuthPrincipal,
   CredentialPayload,
 } from '../../common/interfaces/auth.interface';
+import { ErrorMessage } from '../../common/constants/error-messages';
 
 /**
  * 本地用户实体（演示用）
@@ -68,20 +69,18 @@ export class JwtAuthStrategy implements AuthStrategy {
     const { username, password } = credentials;
 
     if (!username || !password) {
-      throw new UnauthorizedException(
-        'JWT 认证需要提供 username 和 password',
-      );
+      throw new UnauthorizedException(ErrorMessage.JWT_CREDENTIALS_REQUIRED);
     }
 
     const user = this.users.find((u) => u.username === username);
     if (!user) {
-      throw new UnauthorizedException('用户名或密码错误');
+      throw new UnauthorizedException(ErrorMessage.JWT_INVALID_CREDENTIALS);
     }
 
     // 使用 bcrypt 比对密码哈希，避免明文存储与比较
     const valid = await bcrypt.compare(password, user.passwordHash);
     if (!valid) {
-      throw new UnauthorizedException('用户名或密码错误');
+      throw new UnauthorizedException(ErrorMessage.JWT_INVALID_CREDENTIALS);
     }
 
     return {

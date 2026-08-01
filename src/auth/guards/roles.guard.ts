@@ -7,6 +7,10 @@ import {
 import { Reflector } from '@nestjs/core';
 import { ROLES_KEY } from '../decorators/roles.decorator';
 import { RequestUser } from '../decorators/current-user.decorator';
+import {
+  ErrorMessage,
+  formatErrorMessage,
+} from '../../common/constants/error-messages';
 
 /**
  * 角色权限守卫（框架层 RBAC）
@@ -41,7 +45,7 @@ export class RolesGuard implements CanActivate {
     const user = request.user as RequestUser | undefined;
 
     if (!user || !user.payload?.roles) {
-      throw new ForbiddenException('无法获取用户角色信息');
+      throw new ForbiddenException(ErrorMessage.GUARD_NO_ROLE_INFO);
     }
 
     const userRoles = user.payload.roles;
@@ -50,7 +54,10 @@ export class RolesGuard implements CanActivate {
 
     if (!hasRole) {
       throw new ForbiddenException(
-        `权限不足，需要以下角色之一: ${requiredRoles.join(', ')}`,
+        formatErrorMessage(
+          ErrorMessage.GUARD_FORBIDDEN_ROLES,
+          requiredRoles.join(', '),
+        ),
       );
     }
 

@@ -8,6 +8,7 @@ import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
 import { AuthService } from '../services/auth.service';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+import { ErrorMessage } from '../../common/constants/error-messages';
 
 /**
  * JWT 认证守卫
@@ -38,7 +39,7 @@ export class JwtAuthGuard implements CanActivate {
     const token = this.extractToken(request);
 
     if (!token) {
-      throw new UnauthorizedException('未提供认证令牌，请先登录');
+      throw new UnauthorizedException(ErrorMessage.GUARD_NO_TOKEN);
     }
 
     // 校验 token 与服务端会话

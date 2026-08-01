@@ -13,6 +13,10 @@ import {
   AuthPrincipal,
   CredentialPayload,
 } from '../../common/interfaces/auth.interface';
+import {
+  ErrorMessage,
+  formatErrorMessage,
+} from '../../common/constants/error-messages';
 
 /**
  * LDAP 目录服务认证策略
@@ -42,7 +46,7 @@ export class LdapAuthStrategy implements AuthStrategy {
     const value = this.config.get<string>(key);
     if (value === undefined || value === null || value === '') {
       throw new InternalServerErrorException(
-        `LDAP 配置缺失: ${key}，请检查 .env 中的相关环境变量`,
+        formatErrorMessage(ErrorMessage.LDAP_CONFIG_MISSING, key),
       );
     }
     return value;
@@ -51,7 +55,7 @@ export class LdapAuthStrategy implements AuthStrategy {
   async authenticate(credentials: CredentialPayload): Promise<AuthPrincipal> {
     const { username, password } = credentials;
     if (!username || !password) {
-      throw new UnauthorizedException('LDAP 认证需要提供 username 和 password');
+      throw new UnauthorizedException(ErrorMessage.LDAP_CREDENTIALS_REQUIRED);
     }
 
     const url = this.requireConfig('ldap.url');
@@ -72,7 +76,7 @@ export class LdapAuthStrategy implements AuthStrategy {
         this.logger.error(`LDAP 连接错误: ${err.message}`);
         reject(
           new InternalServerErrorException(
-            `无法连接 LDAP 服务器: ${err.message}`,
+            formatErrorMessage(ErrorMessage.LDAP_CONNECT_FAILED, err.message),
           ),
         );
       });
@@ -83,7 +87,10 @@ export class LdapAuthStrategy implements AuthStrategy {
           client.unbind();
           return reject(
             new InternalServerErrorException(
-              `LDAP 管理员绑定失败: ${bindErr.message}`,
+              formatErrorMessage(
+                ErrorMessage.LDAP_ADMIN_BIND_FAILED,
+                bindErr.message,
+              ),
             ),
           );
         }
@@ -99,7 +106,12 @@ export class LdapAuthStrategy implements AuthStrategy {
           if (searchErr) {
             client.unbind();
             return reject(
-              new UnauthorizedException(`LDAP 搜索失败: ${searchErr.message}`),
+              new UnauthorizedException(
+                formatErrorMessage(
+                  ErrorMessage.LDAP_SEARCH_FAILED,
+                  searchErr.message,
+                ),
+              ),
             );
           }
 
@@ -112,13 +124,19 @@ export class LdapAuthStrategy implements AuthStrategy {
 
           res.on('error', (err: Error) => {
             client.unbind();
-            reject(new UnauthorizedException(`LDAP 搜索错误: ${err.message}`));
+            reject(
+              new UnauthorizedException(
+                formatErrorMessage(ErrorMessage.LDAP_SEARCH_ERROR, err.message),
+              ),
+            );
           });
 
           res.on('end', () => {
             if (!userEntry) {
               client.unbind();
-              return reject(new UnauthorizedException('LDAP 用户不存在'));
+              return reject(
+                new UnauthorizedException(ErrorMessage.LDAP_USER_NOT_FOUND),
+              );
             }
 
             // 进入回调后 userEntry 不会再被赋值，锁定为非空引用
@@ -129,7 +147,7 @@ export class LdapAuthStrategy implements AuthStrategy {
             if (!userDn) {
               client.unbind();
               return reject(
-                new UnauthorizedException('LDAP 用户条目缺少 DN'),
+                new UnauthorizedException(ErrorMessage.LDAP_ENTRY_NO_DN),
               );
             }
             // 步骤 3：用用户 DN + 密码重新绑定验证
@@ -137,7 +155,9 @@ export class LdapAuthStrategy implements AuthStrategy {
               if (userBindErr) {
                 client.unbind();
                 return reject(
-                  new UnauthorizedException('LDAP 用户名或密码错误'),
+                  new UnauthorizedException(
+                    ErrorMessage.LDAP_INVALID_CREDENTIALS,
+                  ),
                 );
               }
 

@@ -12,6 +12,10 @@ import {
   AuthPrincipal,
   CredentialPayload,
 } from '../../common/interfaces/auth.interface';
+import {
+  ErrorMessage,
+  formatErrorMessage,
+} from '../../common/constants/error-messages';
 
 /**
  * OAuth2.0 授权码模式认证策略
@@ -44,7 +48,7 @@ export class OAuth2AuthStrategy implements AuthStrategy {
     const value = this.config.get<string>(key);
     if (value === undefined || value === null || value === '') {
       throw new InternalServerErrorException(
-        `OAuth2 配置缺失: ${key}，请检查 .env 中的相关环境变量`,
+        formatErrorMessage(ErrorMessage.OAUTH2_CONFIG_MISSING, key),
       );
     }
     return value;
@@ -70,7 +74,7 @@ export class OAuth2AuthStrategy implements AuthStrategy {
   async authenticate(credentials: CredentialPayload): Promise<AuthPrincipal> {
     const { code } = credentials;
     if (!code) {
-      throw new UnauthorizedException('OAuth2 认证需要提供授权码 code');
+      throw new UnauthorizedException(ErrorMessage.OAUTH2_CODE_REQUIRED);
     }
 
     // 1. 用授权码换取 access_token
@@ -99,13 +103,18 @@ export class OAuth2AuthStrategy implements AuthStrategy {
     } catch (err) {
       this.logger.error(`请求 OAuth2 token 端点失败: ${(err as Error).message}`);
       throw new UnauthorizedException(
-        '无法连接 OAuth2 授权服务器，请检查网络或配置',
+        ErrorMessage.OAUTH2_TOKEN_FETCH_FAILED,
       );
     }
 
     if (!tokenResponse?.access_token) {
       throw new UnauthorizedException(
-        `OAuth2 授权码换取令牌失败: ${tokenResponse?.error_description || tokenResponse?.error || '未知错误'}`,
+        formatErrorMessage(
+          ErrorMessage.OAUTH2_TOKEN_EXCHANGE_FAILED,
+          tokenResponse?.error_description ||
+            tokenResponse?.error ||
+            '未知错误',
+        ),
       );
     }
 
@@ -119,7 +128,7 @@ export class OAuth2AuthStrategy implements AuthStrategy {
       userInfo = await resp.json();
     } catch (err) {
       this.logger.error(`请求 OAuth2 userinfo 端点失败: ${(err as Error).message}`);
-      throw new UnauthorizedException('获取 OAuth2 用户信息失败');
+      throw new UnauthorizedException(ErrorMessage.OAUTH2_USERINFO_FAILED);
     }
 
     // 3. 映射为统一主体
@@ -134,7 +143,9 @@ export class OAuth2AuthStrategy implements AuthStrategy {
       userInfo.email;
 
     if (!userId || !username) {
-      throw new UnauthorizedException('OAuth2 用户信息缺少必要字段（id/username）');
+      throw new UnauthorizedException(
+        ErrorMessage.OAUTH2_USERINFO_MISSING_FIELDS,
+      );
     }
 
     return {

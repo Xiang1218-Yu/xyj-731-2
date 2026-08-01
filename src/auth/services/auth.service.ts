@@ -13,6 +13,7 @@ import {
   CredentialPayload,
 } from '../../common/interfaces/auth.interface';
 import { AuthStrategyType } from '../../common/enums/auth-strategy.enum';
+import { ErrorMessage } from '../../common/constants/error-messages';
 
 /**
  * 统一认证服务
@@ -106,17 +107,17 @@ export class AuthService {
     try {
       payload = await this.tokenService.verifyToken(refreshToken);
     } catch {
-      throw new UnauthorizedException('refresh token 无效或已过期');
+      throw new UnauthorizedException(ErrorMessage.AUTH_INVALID_REFRESH_TOKEN);
     }
 
     if (payload.type !== 'refresh') {
-      throw new UnauthorizedException('请使用 refresh token 刷新');
+      throw new UnauthorizedException(ErrorMessage.AUTH_USE_REFRESH_TOKEN);
     }
 
     // 从 Redis 查询会话是否仍然有效
     const session = await this.sessionService.getSession(payload.sub);
     if (!session) {
-      throw new UnauthorizedException('会话已失效，请重新登录');
+      throw new UnauthorizedException(ErrorMessage.AUTH_SESSION_EXPIRED);
     }
 
     // 校验 refresh token 摘要
@@ -127,7 +128,9 @@ export class AuthService {
     if (!valid) {
       // refresh token 可能被盗用，销毁会话强制重新登录
       await this.sessionService.destroySession(session.sessionId);
-      throw new UnauthorizedException('refresh token 不匹配，会话已失效');
+      throw new UnauthorizedException(
+        ErrorMessage.AUTH_REFRESH_TOKEN_MISMATCH,
+      );
     }
 
     // 删除旧会话（refresh token rotation，防止旧 token 被重用）
@@ -187,16 +190,16 @@ export class AuthService {
     try {
       payload = await this.tokenService.verifyToken(accessToken);
     } catch {
-      throw new UnauthorizedException('access token 无效或已过期');
+      throw new UnauthorizedException(ErrorMessage.AUTH_INVALID_ACCESS_TOKEN);
     }
 
     if (payload.type !== 'access') {
-      throw new UnauthorizedException('令牌类型错误');
+      throw new UnauthorizedException(ErrorMessage.AUTH_WRONG_TOKEN_TYPE);
     }
 
     const session = await this.sessionService.getSession(payload.sub);
     if (!session) {
-      throw new UnauthorizedException('会话已失效，请重新登录');
+      throw new UnauthorizedException(ErrorMessage.AUTH_SESSION_EXPIRED);
     }
 
     return { payload, session };

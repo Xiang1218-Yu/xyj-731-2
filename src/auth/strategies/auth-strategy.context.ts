@@ -12,6 +12,10 @@ import { OAuth2AuthStrategy } from './oauth2-auth.strategy';
 import { LdapAuthStrategy } from './ldap-auth.strategy';
 import { AuthStrategyType } from '../../common/enums/auth-strategy.enum';
 import { CredentialPayload } from '../../common/interfaces/auth.interface';
+import {
+  ErrorMessage,
+  formatErrorMessage,
+} from '../../common/constants/error-messages';
 
 /**
  * 认证策略上下文（Strategy Context）
@@ -67,7 +71,9 @@ export class AuthStrategyContext implements OnModuleInit {
   setStrategy(type: AuthStrategyType): void {
     if (!this.strategies.has(type)) {
       // 切换到一个未注册的策略属于客户端请求参数错误，返回 400
-      throw new BadRequestException(`不支持的认证策略: ${type}`);
+      throw new BadRequestException(
+        formatErrorMessage(ErrorMessage.STRATEGY_UNSUPPORTED, type),
+      );
     }
     this.currentStrategy = type;
   }
@@ -95,7 +101,7 @@ export class AuthStrategyContext implements OnModuleInit {
     if (!strategy) {
       // 未找到对应策略通常意味着系统配置异常，返回 401 表明无法完成认证
       throw new UnauthorizedException(
-        `未找到认证策略: ${strategyType}，请检查系统配置`,
+        formatErrorMessage(ErrorMessage.STRATEGY_NOT_FOUND, strategyType),
       );
     }
     return strategy.authenticate(credentials);
@@ -106,7 +112,9 @@ export class AuthStrategyContext implements OnModuleInit {
     const strategy = this.strategies.get(type);
     if (!strategy) {
       // 代码层面请求了一个未注册的策略，属于服务端资源/配置缺失，返回 404
-      throw new NotFoundException(`未找到认证策略: ${type}`);
+      throw new NotFoundException(
+        formatErrorMessage(ErrorMessage.STRATEGY_INSTANCE_NOT_FOUND, type),
+      );
     }
     return strategy as T;
   }

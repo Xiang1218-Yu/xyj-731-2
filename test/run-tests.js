@@ -11,10 +11,15 @@
 const { summary } = require('./helpers/assert');
 
 const suites = [
+  // 纯单元测试（无需 HTTP 服务）放在最前，尽早暴露问题
+  require('./suites/token-service.test'),
+  require('./suites/strategy-config.test'),
+  // HTTP 接口测试（需要服务运行）
   require('./suites/jwt-auth.test'),
   require('./suites/strategy-switch.test'),
   require('./suites/external-strategy.test'),
   require('./suites/swagger.test'),
+  require('./suites/error-handling.test'),
 ];
 
 async function waitForServer(maxRetries = 10) {
