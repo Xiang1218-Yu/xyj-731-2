@@ -12,6 +12,7 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
+import { getRequiredString } from '../../common/utils/config.util';
 import { AuthenticatedUser } from '../../common/interfaces/authenticated-user.interface';
 import { AuthService } from '../auth.service';
 
@@ -38,7 +39,8 @@ export class JwtPassportStrategy extends PassportStrategy(
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       // 不在这里忽略过期，交给校验逻辑统一处理
       ignoreExpiration: false,
-      secretOrKey: configService.get<string>('jwt.secret')!,
+      // 显式校验密钥配置存在性，不使用非空断言
+      secretOrKey: getRequiredString(configService, 'jwt.secret'),
       issuer: configService.get<string>('jwt.issuer'),
     });
   }

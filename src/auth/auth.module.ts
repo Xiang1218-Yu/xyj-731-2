@@ -14,6 +14,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
+import { getRequiredString } from '../common/utils/config.util';
 import { SessionModule } from '../session/session.module';
 import { UsersModule } from '../users/users.module';
 import { AuthController } from './auth.controller';
@@ -32,15 +33,16 @@ import { OAuth2Strategy } from './strategies/oauth2.strategy';
     UsersModule,
     SessionModule,
     PassportModule,
-    // 异步配置 JwtModule，从 ConfigService 读取密钥与过期时间
+    // 异步配置 JwtModule，从 ConfigService 读取并校验密钥与过期时间
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        secret: config.get<string>('jwt.secret'),
+        // 显式校验必填配置，不使用非空断言；缺失时模块初始化即失败
+        secret: getRequiredString(config, 'jwt.secret'),
         signOptions: {
-          expiresIn: config.get<string>('jwt.expiresIn'),
-          issuer: config.get<string>('jwt.issuer'),
+          expiresIn: getRequiredString(config, 'jwt.expiresIn'),
+          issuer: getRequiredString(config, 'jwt.issuer'),
         },
       }),
     }),

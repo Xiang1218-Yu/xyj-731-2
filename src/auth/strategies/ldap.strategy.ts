@@ -19,6 +19,7 @@ import {
   AuthResult,
   AuthenticatedUser,
 } from '../../common/interfaces/authenticated-user.interface';
+import { getRequiredString } from '../../common/utils/config.util';
 import { UsersService } from '../../users/users.service';
 import { AuthStrategy } from './auth-strategy.interface';
 
@@ -68,13 +69,21 @@ export class LdapStrategy implements AuthStrategy {
     username: string,
     password: string,
   ): Promise<AuthenticatedUser> {
-    const url = this.configService.get<string>('ldap.url')!;
-    const bindDn = this.configService.get<string>('ldap.bindDn')!;
-    const bindCredentials = this.configService.get<string>(
+    // 显式读取并校验必填配置项，不使用非空断言
+    const url = getRequiredString(this.configService, 'ldap.url');
+    const bindDn = getRequiredString(this.configService, 'ldap.bindDn');
+    const bindCredentials = getRequiredString(
+      this.configService,
       'ldap.bindCredentials',
-    )!;
-    const searchBase = this.configService.get<string>('ldap.searchBase')!;
-    const filterTpl = this.configService.get<string>('ldap.searchFilter')!;
+    );
+    const searchBase = getRequiredString(
+      this.configService,
+      'ldap.searchBase',
+    );
+    const filterTpl = getRequiredString(
+      this.configService,
+      'ldap.searchFilter',
+    );
     const filter = filterTpl.replace('{{username}}', this.escapeLdap(username));
 
     return new Promise((resolve, reject) => {
@@ -198,22 +207,52 @@ export class LdapStrategy implements AuthStrategy {
   }
 
   /**
-   * 判断是否可以本地回退
+   * 判断是否可以本地回退。
+   *
+   * 与 OAuth2 策略一致: 仅连接/网络层故障才回退，认证失败类错误不回退。
+   * 通过错误码(.code)或消息中明确的系统错误码判定，避免宽泛的子串匹配
+   * （如 'connect'/'timeout'）误伤业务错误。
    */
+  private static readonly NETWORK_ERROR_CODES = new Set<string>([
+    'ECONNREFUSED',
+    'ENOTFOUND',
+    'ETIMEDOUT',
+    'ECONNRESET',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'EAI_AGAIN',
+  ]);
+
   private shouldFallback(err: unknown): boolean {
     if (!this.configService.get<boolean>('allowLocalFallback')) {
       return false;
     }
-    const msg = (err as Error).message || '';
-    // LDAP 连接失败类错误才回退，认证失败类错误不回退
-    return (
-      msg.includes('ECONNREFUSED') ||
-      msg.includes('ENOTFOUND') ||
-      msg.includes('ETIMEDOUT') ||
-      msg.includes('connect') ||
-      msg.includes('timeout') ||
-      msg.includes('127.0.0.1:389')
-    );
+    // 业务层显式抛出的认证失败绝不回退
+    if (err instanceof UnauthorizedException) {
+      return false;
+    }
+
+    // 1. 优先检查错误对象及其 cause 链上的系统错误码
+    let current: unknown = err;
+    for (let depth = 0; depth < 5 && current; depth++) {
+      const code = (current as { code?: string }).code;
+      if (
+        typeof code === 'string' &&
+        LdapStrategy.NETWORK_ERROR_CODES.has(code)
+      ) {
+        return true;
+      }
+      current = (current as { cause?: unknown }).cause;
+    }
+
+    // 2. ldapjs 可能把系统错误码放入 message，按明确错误码匹配（不含宽泛的 connect/timeout）
+    const message = (err as Error)?.message || '';
+    for (const code of LdapStrategy.NETWORK_ERROR_CODES) {
+      if (message.includes(code)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

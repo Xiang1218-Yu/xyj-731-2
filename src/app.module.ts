@@ -14,6 +14,7 @@ import { APP_FILTER } from '@nestjs/core';
 import { AuthModule } from './auth/auth.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import configuration from './config/configuration';
+import { validate } from './config/env.validation';
 import { HealthController } from './health.controller';
 import { SessionModule } from './session/session.module';
 import { UsersModule } from './users/users.module';
@@ -25,6 +26,8 @@ import { UsersModule } from './users/users.module';
       isGlobal: true,
       load: [configuration],
       envFilePath: ['.env'],
+      // 启动时校验环境变量格式，非法配置直接中止启动
+      validate,
     }),
     UsersModule,
     SessionModule,

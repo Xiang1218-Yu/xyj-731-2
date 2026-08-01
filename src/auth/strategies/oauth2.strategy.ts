@@ -19,6 +19,7 @@ import {
   AuthResult,
   AuthenticatedUser,
 } from '../../common/interfaces/authenticated-user.interface';
+import { getRequiredString } from '../../common/utils/config.util';
 import { UsersService } from '../../users/users.service';
 import { AuthStrategy } from './auth-strategy.interface';
 
@@ -56,10 +57,16 @@ export class OAuth2Strategy implements AuthStrategy {
    * 生成 OAuth2 授权地址，引导用户跳转到第三方授权服务器
    */
   getAuthorizeUrl(state: string): string {
-    const base = this.configService.get<string>('oauth2.authorizationUrl')!;
-    const clientId = this.configService.get<string>('oauth2.clientId')!;
-    const redirectUri = this.configService.get<string>('oauth2.callbackUrl')!;
-    const scope = this.configService.get<string>('oauth2.scope')!;
+    const base = getRequiredString(
+      this.configService,
+      'oauth2.authorizationUrl',
+    );
+    const clientId = getRequiredString(this.configService, 'oauth2.clientId');
+    const redirectUri = getRequiredString(
+      this.configService,
+      'oauth2.callbackUrl',
+    );
+    const scope = getRequiredString(this.configService, 'oauth2.scope');
 
     const params = new URLSearchParams({
       response_type: 'code',
@@ -107,10 +114,13 @@ export class OAuth2Strategy implements AuthStrategy {
       this.logger.log(`OAuth2 认证成功: ${user.username}`);
       return { user, details: { accessToken: token } };
     } catch (err) {
-      // 外部服务不可用时，若允许本地回退则使用本地用户库（仅开发/测试）
+      // 仅在网络/连接层错误时，若允许本地回退则使用本地用户库（仅开发/测试）。
+      // 注意: 业务错误（如 400 invalid_grant、401 invalid_token、用户信息缺失等）
+      //       绝不能回退，否则攻击者可通过提交非法 OAuth2 凭证绕过第三方认证
+      //       直接命中本地用户库，造成安全边界被削弱。
       if (this.shouldFallback(err)) {
         this.logger.warn(
-          `OAuth2 外部服务不可用，回退本地校验: ${(err as Error).message}`,
+          `OAuth2 外部服务网络不可达，回退本地校验: ${(err as Error).message}`,
         );
         return this.localFallback(credentials);
       }
@@ -124,12 +134,16 @@ export class OAuth2Strategy implements AuthStrategy {
   private async exchangeCodeForToken(
     code: string,
   ): Promise<OAuth2TokenResponse> {
-    const tokenUrl = this.configService.get<string>('oauth2.tokenUrl')!;
-    const clientId = this.configService.get<string>('oauth2.clientId')!;
-    const clientSecret = this.configService.get<string>(
+    const tokenUrl = getRequiredString(this.configService, 'oauth2.tokenUrl');
+    const clientId = getRequiredString(this.configService, 'oauth2.clientId');
+    const clientSecret = getRequiredString(
+      this.configService,
       'oauth2.clientSecret',
-    )!;
-    const redirectUri = this.configService.get<string>('oauth2.callbackUrl')!;
+    );
+    const redirectUri = getRequiredString(
+      this.configService,
+      'oauth2.callbackUrl',
+    );
 
     const body = new URLSearchParams({
       grant_type: 'authorization_code',
@@ -160,12 +174,13 @@ export class OAuth2Strategy implements AuthStrategy {
     username: string,
     password: string,
   ): Promise<OAuth2TokenResponse> {
-    const tokenUrl = this.configService.get<string>('oauth2.tokenUrl')!;
-    const clientId = this.configService.get<string>('oauth2.clientId')!;
-    const clientSecret = this.configService.get<string>(
+    const tokenUrl = getRequiredString(this.configService, 'oauth2.tokenUrl');
+    const clientId = getRequiredString(this.configService, 'oauth2.clientId');
+    const clientSecret = getRequiredString(
+      this.configService,
       'oauth2.clientSecret',
-    )!;
-    const scope = this.configService.get<string>('oauth2.scope')!;
+    );
+    const scope = getRequiredString(this.configService, 'oauth2.scope');
 
     const body = new URLSearchParams({
       grant_type: 'password',
@@ -194,7 +209,10 @@ export class OAuth2Strategy implements AuthStrategy {
    * 携带 access token 请求用户信息端点
    */
   private async fetchUserInfo(token: string): Promise<OAuth2UserInfo> {
-    const userInfoUrl = this.configService.get<string>('oauth2.userInfoUrl')!;
+    const userInfoUrl = getRequiredString(
+      this.configService,
+      'oauth2.userInfoUrl',
+    );
     const res = await fetch(userInfoUrl, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -227,21 +245,59 @@ export class OAuth2Strategy implements AuthStrategy {
   }
 
   /**
-   * 判断是否允许本地回退（外部服务网络错误或配置为示例地址时）
+   * 判断是否允许本地回退。
+   *
+   * 安全红线: 仅当错误属于"网络/连接层"故障（DNS 解析失败、连接被拒、超时等）时才回退；
+   * 任何业务层错误（HTTP 4xx/5xx、令牌无效、授权码错误、用户信息缺失等）一律不回退，
+   * 防止攻击者通过制造业务错误绕过第三方认证。
+   *
+   * 判定方式: 遍历错误 cause 链（undici 的 fetch 会将系统错误包装在 cause 中），
+   * 命中明确的网络错误码白名单即视为网络故障。
    */
+  private static readonly NETWORK_ERROR_CODES = new Set<string>([
+    'ENOTFOUND', // DNS 解析失败
+    'ECONNREFUSED', // 连接被拒绝
+    'ECONNRESET', // 连接被重置
+    'ETIMEDOUT', // 连接/读写超时
+    'EHOSTUNREACH', // 主机不可达
+    'ENETUNREACH', // 网络不可达
+    'EAI_AGAIN', // DNS 临时故障
+    'EPIPE', // 管道破裂
+    'ECONNABORTED', // 连接中止
+  ]);
+
   private shouldFallback(err: unknown): boolean {
+    // 未启用本地回退时直接拒绝
     if (!this.configService.get<boolean>('allowLocalFallback')) {
       return false;
     }
-    const msg = (err as Error).message || '';
-    // 网络错误 / 示例域名 / 连接失败 时允许回退
-    return (
-      msg.includes('fetch failed') ||
-      msg.includes('ENOTFOUND') ||
-      msg.includes('ECONNREFUSED') ||
-      msg.includes('example-oauth2-server') ||
-      msg.includes('OAuth2')
-    );
+
+    // 业务层显式抛出的 UnauthorizedException 绝不回退
+    // （授权码失效、令牌无效、用户信息缺失等均属于此类）
+    if (err instanceof UnauthorizedException) {
+      return false;
+    }
+
+    // 沿 cause 链查找系统网络错误码
+    let current: unknown = err;
+    for (let depth = 0; depth < 5 && current; depth++) {
+      const code = (current as { code?: string }).code;
+      if (
+        typeof code === 'string' &&
+        OAuth2Strategy.NETWORK_ERROR_CODES.has(code)
+      ) {
+        return true;
+      }
+      current = (current as { cause?: unknown }).cause;
+    }
+
+    // 兜底: undici 在网络层失败时顶层 message 固定为 "fetch failed"
+    const topMessage = (err as Error)?.message || '';
+    if (topMessage === 'fetch failed' || topMessage.includes('fetch failed')) {
+      return true;
+    }
+
+    return false;
   }
 
   /**

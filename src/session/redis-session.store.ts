@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
+import { getRequiredNumber, getRequiredString } from '../common/utils/config.util';
 import { SessionData } from '../common/interfaces/authenticated-user.interface';
 import { SessionStore } from './session-store.interface';
 
@@ -31,8 +32,9 @@ export class RedisSessionStore
    * 使用 lazyConnect，避免在 Redis 不可用时阻塞应用启动
    */
   async onModuleInit(): Promise<void> {
-    const host = this.configService.get<string>('redis.host')!;
-    const port = this.configService.get<number>('redis.port')!;
+    // 显式读取并校验必填配置项，不使用非空断言
+    const host = getRequiredString(this.configService, 'redis.host');
+    const port = getRequiredNumber(this.configService, 'redis.port');
 
     this.client = new Redis({
       host,

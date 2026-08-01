@@ -7,9 +7,14 @@
  *
  * 会话 ID 通过 refresh token 携带，登出/刷新时据此操作会话。
  */
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
+import { ConfigurationException } from '../common/exceptions/configuration.exception';
 import { SessionData } from '../common/interfaces/authenticated-user.interface';
 import { MemorySessionStore } from './memory-session.store';
 import { RedisSessionStore } from './redis-session.store';
@@ -19,28 +24,58 @@ import { SessionStore } from './session-store.interface';
 export class SessionService implements OnModuleInit {
   private readonly logger = new Logger(SessionService.name);
   private store!: SessionStore;
-  private sessionTtl: number;
+  private readonly sessionTtl: number;
 
   constructor(
     private readonly redisStore: RedisSessionStore,
     private readonly memoryStore: MemorySessionStore,
     private readonly configService: ConfigService,
   ) {
-    this.sessionTtl = this.configService.get<number>('redis.sessionTtl')!;
+    // 显式读取并校验会话 TTL，不使用非空断言
+    const ttl = this.configService.get<number>('redis.sessionTtl');
+    if (
+      ttl === undefined ||
+      ttl === null ||
+      !Number.isFinite(ttl) ||
+      ttl <= 0
+    ) {
+      throw new ConfigurationException(
+        `SESSION_TTL 配置非法（当前值: ${process.env.SESSION_TTL}），必须为正整数（秒）`,
+      );
+    }
+    this.sessionTtl = ttl;
   }
 
-  onModuleInit() {
-    // 启动时选择存储后端: 优先 Redis，不可用则按配置降级
+  /**
+   * 启动时选择存储后端。
+   *
+   * 优先使用 Redis；Redis 不可用时，若允许内存降级则切换内存存储；
+   * 若未允许降级则显式抛出异常中止应用启动，避免"假启动"——
+   * 即进程存活但所有会话操作都会失败、调用方却无感知的情况。
+   */
+  onModuleInit(): void {
     if (this.redisStore.isAvailable()) {
       this.store = this.redisStore;
       this.logger.log('会话存储使用 Redis');
-    } else if (this.configService.get<boolean>('redis.fallbackMemory')) {
-      this.store = this.memoryStore;
-      this.logger.warn('Redis 不可用，会话存储降级为内存存储');
-    } else {
-      this.store = this.redisStore;
-      this.logger.error('Redis 不可用且未启用内存降级，会话功能将异常');
+      return;
     }
+
+    const fallbackEnabled =
+      this.configService.get<boolean>('redis.fallbackMemory');
+
+    if (fallbackEnabled) {
+      this.store = this.memoryStore;
+      this.logger.warn(
+        'Redis 不可用，会话存储已降级为内存存储（仅限开发/测试环境）',
+      );
+      return;
+    }
+
+    // Redis 不可用且未启用降级，直接抛出异常阻止应用启动
+    throw new ConfigurationException(
+      'Redis 不可用且未启用内存降级（REDIS_FALLBACK_MEMORY=false），' +
+        '请检查 Redis 连接配置或启用降级后重试。应用启动中止。',
+    );
   }
 
   /**

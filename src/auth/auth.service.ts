@@ -16,7 +16,12 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as crypto from 'crypto';
+import { ConfigurationException } from '../common/exceptions/configuration.exception';
 import { AuthType } from '../common/enums/auth-type.enum';
+import {
+  getRequiredString,
+  validateDuration,
+} from '../common/utils/config.util';
 import {
   AuthCredentials,
   AuthenticatedUser,
@@ -113,7 +118,8 @@ export class AuthService {
       payload = await this.jwtService.verifyAsync<RefreshPayload>(
         refreshToken,
         {
-          secret: this.configService.get<string>('jwt.secret'),
+          // 使用经校验的密钥，保证与 issueTokens 读取配置的方式一致
+          secret: getRequiredString(this.configService, 'jwt.secret'),
         },
       );
     } catch {
@@ -144,7 +150,8 @@ export class AuthService {
       payload = await this.jwtService.verifyAsync<RefreshPayload>(
         refreshToken,
         {
-          secret: this.configService.get<string>('jwt.secret'),
+          // 使用经校验的密钥，保证与 issueTokens 读取配置的方式一致
+          secret: getRequiredString(this.configService, 'jwt.secret'),
         },
       );
     } catch {
@@ -221,6 +228,9 @@ export class AuthService {
 
   /**
    * 签发 access token 与 refresh token
+   *
+   * 所有配置项均显式校验存在性与格式，不使用非空断言（!），
+   * 缺失或非法时抛出 ConfigurationException，避免签发阶段产生难以定位的隐性错误。
    */
   private async issueTokens(
     user: AuthenticatedUser,
@@ -231,12 +241,22 @@ export class AuthService {
     expiresIn: number;
     tokenType: string;
   }> {
-    const secret = this.configService.get<string>('jwt.secret')!;
-    const accessExpiresIn = this.configService.get<string>('jwt.expiresIn')!;
-    const refreshExpiresIn = this.configService.get<string>(
+    // 1. 显式读取并校验必填配置项（不使用非空断言，复用共享校验工具）
+    const secret = getRequiredString(this.configService, 'jwt.secret');
+    if (secret.length < 16) {
+      throw new ConfigurationException(
+        'jwt.secret 长度不足，至少需要 16 个字符',
+      );
+    }
+    const accessExpiresIn = validateDuration(
+      getRequiredString(this.configService, 'jwt.expiresIn'),
+      'jwt.expiresIn',
+    );
+    const refreshExpiresIn = validateDuration(
+      getRequiredString(this.configService, 'jwt.refreshExpiresIn'),
       'jwt.refreshExpiresIn',
-    )!;
-    const issuer = this.configService.get<string>('jwt.issuer')!;
+    );
+    const issuer = getRequiredString(this.configService, 'jwt.issuer');
 
     const accessPayload: JwtPayload = {
       jti: crypto.randomUUID(),
