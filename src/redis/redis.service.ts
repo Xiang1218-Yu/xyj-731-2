@@ -44,6 +44,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   private allowMemoryFallback = false;
   // 启动是否已判定失败（用于抑制 fail-fast 后的重复错误日志）
   private startupFailed = false;
+  // 客户端是否已被彻底释放：一旦为 true，所有异步 error 事件都静默吞掉，
+  // 确保 disconnect 之后 ioredis 迟到的错误不会变成未处理异常导致进程崩溃（问题 2、3）。
+  private disposed = false;
 
   constructor(private readonly configService: ConfigService) {}
 
@@ -62,24 +65,28 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
         password: redisConfig.password,
         db: redisConfig.db,
         lazyConnect: true,
-        // 只重试有限次数，避免启动时长时间阻塞
+        // 有限次重试：兼顾运行期短暂抖动的自愈能力。
+        // 启动失败时会在 catch 中同步 disconnect(false)，可取消尚未触发的重连定时器，
+        // 因此不会产生 disconnect 之后迟到的 error/reject（问题 1、2）。
         retryStrategy: (times) => (times > 3 ? null : 200),
         maxRetriesPerRequest: 1,
+        // 关闭离线命令队列：连接不可用时命令直接失败而非排队，
+        // 避免在连接关闭后产生 "Connection is closed." 的延迟 reject（问题 1）。
+        enableOfflineQueue: false,
       });
 
-      // 监听错误事件，防止未捕获异常导致进程崩溃。
-      // 启动阶段（fatal 前）静默，避免与 fail-fast 日志重复刷屏。
-      this.client.on('error', (err) => {
-        if (!this.startupFailed) {
-          this.logger.warn(`Redis 连接异常：${err.message}`);
-        }
-      });
+      // 挂载持久化的 error 监听：无论何时都保留一个监听者，
+      // 防止 ioredis 异步抛出的 error 变成 Node 的未处理 'error' 事件（问题 2）。
+      // 释放后或已判定启动失败时静默吞掉，避免日志刷屏。
+      this.client.on('error', (err) => this.handleClientError(err));
 
       await this.client.connect();
       this.logger.log('Redis 连接成功');
     } catch (err) {
       // 安全改造（问题 6）：连接失败时，是否降级取决于显式配置。
       if (this.allowMemoryFallback) {
+        // 降级前也要彻底隔离失败的连接，避免其后台重连/迟到 error 污染运行时
+        this.teardownClient();
         this.useMemoryFallback = true;
         this.logger.warn(
           `无法连接 Redis（${err.message}），已启用内存会话存储。` +
@@ -87,8 +94,8 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
         );
       } else {
         // 默认行为：直接终止启动，阻止服务在无可靠会话存储的情况下运行。
-        // 关键：先彻底断开客户端，移除监听并停止自动重连，
-        // 否则 ioredis 会在进程退出前继续重试并抛出未处理的 CONNECTION_CLOSED 异常（问题 4）。
+        // 关键：先标记 startupFailed，再彻底释放客户端（保留静默 error 监听 + 停止重连），
+        // 否则 ioredis 会在进程退出前继续抛出未处理的 "Connection is closed."（问题 1、2）。
         this.startupFailed = true;
         this.teardownClient();
         this.logger.error(
@@ -103,33 +110,47 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 彻底拆除 Redis 客户端：移除全部监听、强制断开且不再重连。
-   * 用于 fail-fast 场景，防止残留连接在进程退出前持续重试并抛未处理异常。
+   * 统一的客户端 error 事件处理。
+   * - 已释放（disposed）或启动失败（startupFailed）：静默吞掉，防止刷屏与未处理异常。
+   * - 正常运行期间：记录 warn，供运维观察连接抖动。
+   */
+  private handleClientError(err: Error): void {
+    if (this.disposed || this.startupFailed) {
+      return;
+    }
+    this.logger.warn(`Redis 连接异常：${err.message}`);
+  }
+
+  /**
+   * 彻底拆除 Redis 客户端与订阅连接，实现连接失败后的状态隔离（问题 3）。
+   *
+   * 要点：
+   * 1. 先置 disposed，使后续任何异步 error 都被静默吞掉。
+   * 2. 移除业务监听，但重新挂一个"吞错"的 error 监听，
+   *    保证在 disconnect 触发的迟到 error 仍有监听者，绝不冒泡为未处理异常（问题 1、2）。
+   * 3. disconnect(false) 立即断开且不重连，随后置空引用便于 GC。
    */
   private teardownClient(): void {
-    if (this.client) {
-      this.client.removeAllListeners();
-      // disconnect(false) 立即断开且不触发重连
+    this.disposed = true;
+    for (const key of ['client', 'subscriber'] as const) {
+      const conn = this[key];
+      if (!conn) continue;
       try {
-        this.client.disconnect(false);
+        conn.removeAllListeners();
+        // 关键：保留一个静默 error 监听，吞掉断开过程中的迟到错误
+        conn.on('error', () => undefined);
+        conn.disconnect(false);
       } catch {
-        // 忽略断开过程中的异常
+        // 忽略断开过程中的任何异常
       }
-      this.client = null;
-    }
-    if (this.subscriber) {
-      this.subscriber.removeAllListeners();
-      try {
-        this.subscriber.disconnect(false);
-      } catch {
-        // 忽略
-      }
-      this.subscriber = null;
+      this[key] = null;
     }
   }
 
   /** 模块销毁时优雅关闭 Redis 连接（主连接 + 订阅连接） */
   async onModuleDestroy(): Promise<void> {
+    // 先置 disposed，使关闭过程中触发的 error 一律静默，避免退出阶段刷屏
+    this.disposed = true;
     if (this.client) {
       await this.client.quit().catch(() => undefined);
     }
